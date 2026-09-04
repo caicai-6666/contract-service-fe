@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# 由 scripts/sync-pdfjs-assets.mjs 从 pdfjs-dist 自动生成
+/public/pdfjs/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
