@@ -1,5 +1,6 @@
 const AUTH_STORAGE_KEY = 'contract-reviewer-session'
 const AUTH_EXPIRED_EVENT = 'contract-auth-expired'
+const CONTRACT_API_BASE_PATH = `${import.meta.env.DEV ? '/dev' : ''}/contract/api`
 
 let memorySession = null
 
@@ -72,7 +73,7 @@ export function clearAuthSession() {
 }
 
 export async function loginWithSecretKey(secretKey, { signal } = {}) {
-  const response = await fetch('/contract/api/auth/login', {
+  const response = await fetch(`${CONTRACT_API_BASE_PATH}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ secret_key: secretKey }),
@@ -122,4 +123,4 @@ export async function contractApiFetch(input, init = {}) {
   return response
 }
 
-export { AUTH_EXPIRED_EVENT }
+export { AUTH_EXPIRED_EVENT, CONTRACT_API_BASE_PATH }

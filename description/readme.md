@@ -12,8 +12,8 @@
 | 进行代码开发、修改或重构 | [`AGENTS.md`](../AGENTS.md) |
 | 了解审核用户登录和接口鉴权 | [前端登录与鉴权](authentication.md) |
 | 了解智能助手的会话交互 | [智能助手会话交互](agent-conversation.md) |
-| 了解三维合同文件柜原型 | [合同文件柜三维场景](cabinet-scene.md) |
 | 了解合同处理流展示 | [合同处理流展示](contract-ingestion.md) |
+| 了解页面路由和部署回退要求 | [前端页面路由](routing.md) |
 | 新建、修改或审查文档 | [文档撰写风格手册](documentation.md) |
 
 ---
@@ -24,8 +24,8 @@
 description/
   authentication.md     审核用户登录、浏览器会话与接口鉴权
   agent-conversation.md  智能助手空状态、消息进入和会话命名
-  cabinet-scene.md       Three.js 文件柜结构、交互与技术边界
   contract-ingestion.md 合同处理流展示、交互与原型边界
+  routing.md            页面路由、基础路径与部署回退要求
   project.md             项目级开发思想、边界与质量原则
   readme.md              文档统一入口与职责说明
   documentation.md       文档命名、结构、表达与维护规范

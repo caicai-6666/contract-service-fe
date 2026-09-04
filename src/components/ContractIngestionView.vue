@@ -1,8 +1,19 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import {
+  computed,
+  nextTick,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from 'vue'
 import ExtractionAiControl from './ExtractionAiControl.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
+import PdfWorker from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?worker'
 import RollingNumber from './RollingNumber.vue'
 import sleepyEmptyImage from '../assets/瞌睡.webp'
 import {
@@ -12,14 +23,20 @@ import {
   getCoreDefinitions,
   getDeduplicationCandidatePdf,
   getExtractionSnapshot,
+  ingestExtractionRun,
   listExtractionRuns,
   retryExtractionStage,
   streamExtractionEvents,
 } from '../services/contractExtractionApi.js'
 
+defineOptions({ name: 'ContractIngestionView' })
+
+const props = defineProps({ active: { type: Boolean, default: true } })
 const emit = defineEmits(['visual-pause-change'])
 
-const stageOrder = ['detection', 'duplication', 'preprocessing', 'classification', 'field', 'clause', 'retrieval']
+const stageOrder = ['detection', 'duplication', 'preprocessing', 'classification', 'naming', 'field', 'clause', 'retrieval']
+const PDF_COVER_MAX_RASTER_SIDE = 1600
+const PDFJS_ASSET_BASE = `${import.meta.env.BASE_URL}pdfjs/`
 const branchIds = ['field', 'clause', 'retrieval']
 const subProgressStageIds = new Set(['classification', 'field', 'clause', 'retrieval'])
 const backendStageToLocal = {
@@ -27,10 +44,12 @@ const backendStageToLocal = {
   contract_structure_recognition: 'preprocessing',
   pdf_deduplication: 'duplication',
   contract_classification: 'classification',
+  file_name_generation: 'naming',
   core_extraction: 'field',
   clause_extraction: 'clause',
   retrieval_preparation: 'retrieval',
 }
+const draftProducingStageCodes = new Set(['core_extraction', 'clause_extraction'])
 const localStageToBackend = Object.fromEntries(
   Object.entries(backendStageToLocal).map(([backendCode, localId]) => [localId, backendCode]),
 )
@@ -83,6 +102,18 @@ const stages = reactive({
     retryable: false,
     duration: '—',
     summary: '结合文档结构判断合同类别，并为后续提取准备统一上下文。',
+  },
+  naming: {
+    id: 'naming',
+    eyebrow: '智能命名',
+    name: '合同建议名称',
+    message: '等待根据合同内容生成建议名称。',
+    status: 'pending',
+    progress: null,
+    attempt: 0,
+    retryable: false,
+    duration: '—',
+    summary: '结合合同页面、文档结构和分类结果，生成可供入库前校对的展示名称。',
   },
   field: {
     id: 'field',
@@ -159,7 +190,7 @@ const processingExtractionRuns = computed(() => (
 const extractionRunGroups = computed(() => [
   {
     key: 'blocked',
-    title: '需要我处理',
+    title: '需要你处理',
     description: '流程已暂停，请进入任务完成确认、重试或结果复核。',
     runs: blockedExtractionRuns.value,
   },
@@ -211,11 +242,18 @@ const openBooleanControlKey = ref('')
 const workflowError = ref('')
 const currentRunId = ref('')
 const currentRunStatus = ref('')
+const extractionRunCreationPending = computed(() => Boolean(
+  workflowStarted.value && !currentRunId.value,
+))
+const newExtractionDisabled = computed(() => Boolean(
+  workflowSwitching.value || cancellationPending.value || extractionRunCreationPending.value,
+))
 const availableSections = ref([])
 const extractionDraft = ref(null)
 const documentDetection = ref(null)
 const deduplicationReview = ref(null)
 const classificationResult = ref(null)
+const suggestedFileName = ref(null)
 const continuationPending = ref(false)
 const continuationError = ref('')
 const candidatePreviewId = ref('')
@@ -235,10 +273,13 @@ const classificationLoaderPreview = false
 const elapsedClock = ref(0)
 let fileSelectionSequence = 0
 let pdfRuntimePromise = null
+let pdfWorkerPort = null
 let elapsedClockTimer = null
 let coverPresentationTimer = null
+let coverRasterCanvas = null
 let extractionRequestController = null
 let cancellationRequestController = null
+let ingestionRequestController = null
 let eventStreamController = null
 let runsListController = null
 let runRestoreController = null
@@ -247,12 +288,33 @@ let reconnectTimer = null
 let deduplicationRefreshTimer = null
 let workflowScrollExtensionFrame = null
 let workflowSwitchTimer = null
+let ingestionErrorTimer = null
 let lastEventSequence = null
 let streamGeneration = 0
+let viewActive = false
 const resultUpdating = ref(false)
 const modifiedFields = reactive(new Set())
 const draftOverrides = reactive(new Map())
 const editingClauseIds = reactive(new Set())
+const clauseReviewModel = ref([])
+const clauseReviewListRef = ref(null)
+const removingClauseIds = reactive(new Set())
+const clausesLocallyModified = ref(false)
+const reviewFileName = ref('')
+const reviewFileNameModified = ref(false)
+const ingestionPending = ref(false)
+const ingestionErrors = ref([])
+const ingestionReceipt = ref(null)
+const clauseInsertIndex = ref(null)
+const clauseInsertError = ref('')
+const clauseFormAnimating = ref(false)
+const clauseInsertCollapsedHeight = ref(18)
+const newClauseForm = reactive({
+  path: [''],
+  startPage: 1,
+  endPage: 1,
+  content: '',
+})
 const retractingStageIds = reactive(new Set())
 const retractingIncomingEdgeIds = reactive(new Set())
 const retractingResultEdgeIds = reactive(new Set())
@@ -277,9 +339,6 @@ stageOrder.forEach((stageId) => {
 
 const selectedStage = computed(() => stages[selectedStageId.value] || null)
 const isRestoredRun = computed(() => Boolean(restoredRunFileName.value && !selectedSourceFile.value))
-const inputFileNameLocked = computed(() => (
-  workflowStarted.value || uploadInProgress.value || isRestoredRun.value
-))
 const hasInputDocument = computed(() => Boolean(
   selectedSourceFile.value || restoredRunFileName.value || processedDocument.value?.fileName,
 ))
@@ -289,10 +348,6 @@ const selectedFileName = computed(() => (
   || selectedSourceFile.value?.name
   || restoredRunFileName.value
   || '上传合同文件'
-))
-const customFileBaseName = computed(() => stripPdfSuffix(customFileName.value))
-const inputFileNameValue = computed(() => (
-  stripPdfSuffix(inputFileNameLocked.value ? selectedFileName.value : customFileName.value)
 ))
 const selectedFileExtension = computed(() => {
   const extensionMatch = selectedFileName.value.match(/\.([^.]+)$/)
@@ -316,7 +371,7 @@ const selectedFileBadge = computed(() => (
 const selectedFileTypeLabel = computed(() => (
   selectedSourceKind.value === 'image'
     ? `${selectedFileBadge.value} 图片`
-    : 'PDF 文档'
+    : 'PDF文档'
 ))
 const selectedFileSize = computed(() => {
   const bytes = processedDocument.value?.processedFileSizeBytes ?? selectedSourceFile.value?.size
@@ -388,9 +443,7 @@ const extractionControlDisabled = computed(() => {
   if (workflowRewinding.value || cancellationPending.value) return true
   if (canCancelExtractionRun.value) return false
   if (workflowStarted.value || coreDefinitionsLoading.value || uploadInProgress.value) return true
-  return coverReading.value
-    || !selectedFile.value
-    || !customFileBaseName.value.trim()
+  return coverReading.value || !selectedFile.value
 })
 const workflowErrorTitle = computed(() => (
   currentRunId.value || currentRunStatus.value === 'unavailable'
@@ -423,16 +476,23 @@ const resultAvailable = computed(() => (
   || extractionDraft.value?.core !== null && extractionDraft.value?.core !== undefined
   || Array.isArray(extractionDraft.value?.clauses)
 ))
-const resultComplete = computed(() => currentRunStatus.value === 'ready')
+const resultComplete = computed(() => stageOrder.every((stageId) => stages[stageId].status === 'succeeded'))
+const canIngestResult = computed(() => (
+  resultComplete.value
+  && Boolean(currentRunId.value)
+  && !ingestionPending.value
+  && !ingestionReceipt.value
+))
 const resultStats = computed(() => ({
   fields: extractionDraft.value?.core && typeof extractionDraft.value.core === 'object'
     ? Object.keys(extractionDraft.value.core).length
     : 0,
-  clauses: Array.isArray(extractionDraft.value?.clauses) ? extractionDraft.value.clauses.length : 0,
+  clauses: clauseReviewModel.value.length,
 }))
 const deduplicationCandidates = computed(() => deduplicationReview.value?.candidates || [])
-const draftClauses = computed(() => (
-  Array.isArray(extractionDraft.value?.clauses) ? extractionDraft.value.clauses : []
+const draftClauses = computed(() => clauseReviewModel.value)
+const clauseReviewAvailable = computed(() => (
+  availableSections.value.includes('clause') || Array.isArray(extractionDraft.value?.clauses)
 ))
 const coreReviewFields = computed(() => coreDefinitions.value.map((definition) => ({
   ...definition,
@@ -693,8 +753,10 @@ function markResultUpdated() {
 function stopExtractionNetwork() {
   streamGeneration += 1
   extractionRequestController?.abort()
+  ingestionRequestController?.abort()
   eventStreamController?.abort()
   extractionRequestController = null
+  ingestionRequestController = null
   eventStreamController = null
   if (reconnectTimer !== null) {
     window.clearTimeout(reconnectTimer)
@@ -955,6 +1017,22 @@ function syncCoreReviewModelFromDraft() {
   })
 }
 
+function syncClauseReviewModelFromDraft() {
+  if (clausesLocallyModified.value) return
+  const clauses = extractionDraft.value?.clauses
+  clauseReviewModel.value = Array.isArray(clauses)
+    ? clauses.map((clause) => ({ ...clause, path: Array.isArray(clause.path) ? [...clause.path] : [] }))
+    : []
+}
+
+function syncReviewFileNameFromSuggestion() {
+  if (reviewFileNameModified.value) return
+  const suggestedName = suggestedFileName.value?.file_name
+  reviewFileName.value = typeof suggestedName === 'string' && suggestedName.trim()
+    ? suggestedName.trim()
+    : stripPdfSuffix(selectedFileName.value).trim()
+}
+
 async function ensureCoreDefinitions(signal) {
   if (coreDefinitionsReady.value) return
   coreDefinitionsLoading.value = true
@@ -994,6 +1072,8 @@ function applyDraft(draft) {
   if (!draft || typeof draft !== 'object') return
   extractionDraft.value = draft
   syncCoreReviewModelFromDraft()
+  syncClauseReviewModelFromDraft()
+  syncReviewFileNameFromSuggestion()
   markResultUpdated()
 }
 
@@ -1012,6 +1092,10 @@ function applyExtractionSnapshot(snapshot, {
   if (run.document_detection) documentDetection.value = run.document_detection
   if (Object.hasOwn(run, 'classification')) {
     classificationResult.value = normalizeClassificationResult(run.classification)
+  }
+  if (Object.hasOwn(run, 'suggested_file_name')) {
+    suggestedFileName.value = run.suggested_file_name
+    syncReviewFileNameFromSuggestion()
   }
   if (snapshot.draft) applyDraft(snapshot.draft)
 
@@ -1095,6 +1179,14 @@ async function handleExtractionEvent(frame, generation) {
   ) {
     classificationResult.value = normalizeClassificationResult(event.classification)
   }
+  if (
+    event.event_type === 'stage.completed'
+    && event.stage?.code === 'file_name_generation'
+    && event.suggested_file_name
+  ) {
+    suggestedFileName.value = event.suggested_file_name
+    syncReviewFileNameFromSuggestion()
+  }
   if (event.overall_status) {
     currentRunStatus.value = event.overall_status
     const hasActiveStage = stageOrder.some((stageId) =>
@@ -1131,7 +1223,13 @@ async function handleExtractionEvent(frame, generation) {
     eventStreamController?.abort()
   }
 
-  if (!workflowRunning.value && !uploadInProgress.value) eventStreamController?.abort()
+  const awaitingDraftUpdate = event.event_type === 'stage.completed'
+    && draftProducingStageCodes.has(event.stage?.code)
+  // 后端在结果阶段完成事件之后才发布 draft.updated；此处若因 ready 状态立即断流，
+  // 首次处理将错过权威草稿，只能在刷新页面后恢复条款或 Core。
+  if (!workflowRunning.value && !uploadInProgress.value && !awaitingDraftUpdate) {
+    eventStreamController?.abort()
+  }
 }
 
 async function subscribeToExtractionEvents(generation = streamGeneration) {
@@ -1189,6 +1287,7 @@ function resetWorkflowState({ preserveDetail = false } = {}) {
   documentDetection.value = null
   deduplicationReview.value = null
   classificationResult.value = null
+  suggestedFileName.value = null
   continuationPending.value = false
   continuationError.value = ''
   candidatePreviewId.value = ''
@@ -1198,6 +1297,17 @@ function resetWorkflowState({ preserveDetail = false } = {}) {
   modifiedFields.clear()
   draftOverrides.clear()
   editingClauseIds.clear()
+  clauseReviewModel.value = []
+  clausesLocallyModified.value = false
+  removingClauseIds.clear()
+  clauseInsertIndex.value = null
+  clauseInsertError.value = ''
+  clauseFormAnimating.value = false
+  reviewFileName.value = ''
+  reviewFileNameModified.value = false
+  ingestionPending.value = false
+  clearIngestionErrors()
+  ingestionReceipt.value = null
   initializeCoreReviewModel()
   retractingStageIds.clear()
   retractingIncomingEdgeIds.clear()
@@ -1239,6 +1349,7 @@ function resetWorkflowInput() {
   coverReading.value = false
   coverRendered.value = false
   coverPresentationReady.value = false
+  coverRasterCanvas = null
   coverRatio.value = 612 / 792
   coverDimensions.value = null
   fileSelectionSequence += 1
@@ -1250,7 +1361,7 @@ function resetWorkflowInput() {
 }
 
 async function createNewExtractionWorkflow() {
-  if (workflowSwitching.value || cancellationPending.value) return
+  if (newExtractionDisabled.value) return
 
   closeRunsPanel()
   closeDetail()
@@ -1334,7 +1445,7 @@ function stopWorkflow({ force = false, clearRestoredInput = false } = {}) {
     schedule(() => resetStoppedStages(branchStageIds), rewindDelay)
   }
 
-  const sequentialStageIds = ['classification', 'preprocessing', 'duplication', 'detection']
+  const sequentialStageIds = ['naming', 'classification', 'preprocessing', 'duplication', 'detection']
   sequentialStageIds.forEach((stageId) => {
     if (!isActiveStage(stageId)) return
     schedule(() => {
@@ -1383,12 +1494,24 @@ function finalizeCancelledWorkflow(runId) {
   documentDetection.value = null
   deduplicationReview.value = null
   classificationResult.value = null
+  suggestedFileName.value = null
   continuationPending.value = false
   continuationError.value = ''
   workflowError.value = ''
   modifiedFields.clear()
   draftOverrides.clear()
   editingClauseIds.clear()
+  clauseReviewModel.value = []
+  clausesLocallyModified.value = false
+  removingClauseIds.clear()
+  clauseInsertIndex.value = null
+  clauseInsertError.value = ''
+  clauseFormAnimating.value = false
+  reviewFileName.value = ''
+  reviewFileNameModified.value = false
+  ingestionPending.value = false
+  clearIngestionErrors()
+  ingestionReceipt.value = null
   initializeCoreReviewModel()
   stopWorkflow({ force: true, clearRestoredInput })
 }
@@ -1481,7 +1604,7 @@ function extractionRunStatusLabel(status) {
 }
 
 function extractionRunFileName(run) {
-  return run?.document?.file_name || '未命名合同.pdf'
+  return run?.suggested_file_name || run?.document?.file_name || '未命名合同.pdf'
 }
 
 function formatRunTimestamp(value) {
@@ -1579,6 +1702,7 @@ function prepareRestoredRunInput(run) {
   coverReading.value = false
   coverRendered.value = false
   coverPresentationReady.value = false
+  coverRasterCanvas = null
   coverRatio.value = 612 / 792
   coverDimensions.value = null
   fileSelectionSequence += 1
@@ -1638,6 +1762,7 @@ async function restoreExtractionRun(run) {
 
 function closeRunsPanel() {
   runsPanelOpen.value = false
+  stopRunsRefreshTimer()
   runsListController?.abort()
   runsListController = null
   runsLoading.value = false
@@ -1665,11 +1790,19 @@ function toggleRunsPanel() {
   } else {
     refreshExtractionRuns()
   }
-  if (runsRefreshTimer === null) {
-    runsRefreshTimer = window.setInterval(() => {
-      refreshExtractionRuns({ showLoader: false })
-    }, 6000)
-  }
+  startRunsRefreshTimer()
+}
+
+function startRunsRefreshTimer() {
+  if (!viewActive || !runsPanelOpen.value || runsRefreshTimer !== null) return
+  runsRefreshTimer = window.setInterval(() => {
+    refreshExtractionRuns({ showLoader: false })
+  }, 6000)
+}
+
+function stopRunsRefreshTimer() {
+  if (runsRefreshTimer !== null) window.clearInterval(runsRefreshTimer)
+  runsRefreshTimer = null
 }
 
 function openInput() {
@@ -1692,15 +1825,6 @@ function clearInputDocument() {
   if (detailMode.value === 'input') closeDetail()
   resetWorkflowState()
   resetWorkflowInput()
-}
-
-function updateSelectedFileName(event) {
-  if (inputFileNameLocked.value) return
-  const baseName = stripPdfSuffix(event.target.value).slice(0, 251)
-  event.target.value = baseName
-  customFileName.value = `${baseName}.pdf`
-  if (!baseName.trim()) fileSelectionError.value = '请输入文件名称'
-  else if (fileSelectionError.value === '请输入文件名称') fileSelectionError.value = ''
 }
 
 function stripPdfSuffix(fileName) {
@@ -1859,9 +1983,9 @@ async function convertImageToPdf(file, selectionSequence) {
 }
 
 function drawCoverFallback(label) {
-  const canvas = coverCanvas.value
-  const context = canvas?.getContext('2d')
-  if (!canvas || !context) return
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+  if (!context) return
   canvas.width = Math.max(1, Math.round(coverRenderWidth.value))
   canvas.height = Math.max(1, Math.round(coverRenderWidth.value / coverRatio.value))
   context.fillStyle = '#f7f9f8'
@@ -1870,7 +1994,19 @@ function drawCoverFallback(label) {
   context.font = '700 14px sans-serif'
   context.textAlign = 'center'
   context.fillText(label, canvas.width / 2, canvas.height / 2)
-  coverRendered.value = true
+  coverRasterCanvas = canvas
+  coverRendered.value = paintCoverCanvas()
+}
+
+function paintCoverCanvas() {
+  const canvas = coverCanvas.value
+  const context = canvas?.getContext('2d')
+  if (!canvas || !context || !coverRasterCanvas) return false
+
+  canvas.width = coverRasterCanvas.width
+  canvas.height = coverRasterCanvas.height
+  context.drawImage(coverRasterCanvas, 0, 0)
+  return true
 }
 
 function queueCoverPresentationReady(selectionSequence) {
@@ -1889,12 +2025,10 @@ function queueCoverPresentationReady(selectionSequence) {
 
 function loadPdfRuntime() {
   if (!pdfRuntimePromise) {
-    pdfRuntimePromise = Promise.all([
-      import('pdfjs-dist/legacy/build/pdf.mjs'),
-      import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'),
-    ]).then(([pdfModule, workerModule]) => {
-      pdfModule.GlobalWorkerOptions.workerSrc = workerModule.default
-      return { getDocument: pdfModule.getDocument, workerSrc: workerModule.default }
+    pdfRuntimePromise = import('pdfjs-dist/legacy/build/pdf.mjs').then((pdfModule) => {
+      pdfWorkerPort ??= new PdfWorker()
+      pdfModule.GlobalWorkerOptions.workerPort = pdfWorkerPort
+      return { getDocument: pdfModule.getDocument }
     })
   }
   return pdfRuntimePromise
@@ -1908,7 +2042,14 @@ async function readPdfCover(file, selectionSequence) {
   try {
     const { getDocument } = await loadPdfRuntime()
     const data = new Uint8Array(await file.arrayBuffer())
-    loadingTask = getDocument({ data })
+    loadingTask = getDocument({
+      data,
+      cMapUrl: `${PDFJS_ASSET_BASE}cmaps/`,
+      cMapPacked: true,
+      standardFontDataUrl: `${PDFJS_ASSET_BASE}standard_fonts/`,
+      wasmUrl: `${PDFJS_ASSET_BASE}wasm/`,
+      useSystemFonts: true,
+    })
     pdfDocument = await loadingTask.promise
     if (selectionSequence !== fileSelectionSequence) return
     selectedFilePageCount.value = pdfDocument.numPages
@@ -1923,19 +2064,26 @@ async function readPdfCover(file, selectionSequence) {
 
       await nextTick()
       if (selectionSequence !== fileSelectionSequence) return
-      const canvas = coverCanvas.value
-      if (canvas) {
-        const outputScale = Math.min(window.devicePixelRatio || 1, 2)
-        const renderScale = (coverRenderWidth.value * outputScale) / viewport.width
-        const renderViewport = firstPage.getViewport({ scale: renderScale })
-        canvas.width = Math.max(1, Math.floor(renderViewport.width))
-        canvas.height = Math.max(1, Math.floor(renderViewport.height))
-        await firstPage.render({ canvas, viewport: renderViewport, background: '#fff' }).promise
-        if (selectionSequence === fileSelectionSequence) coverRendered.value = true
+      const renderScale = PDF_COVER_MAX_RASTER_SIDE / Math.max(viewport.width, viewport.height)
+      const renderViewport = firstPage.getViewport({ scale: renderScale })
+      const rasterCanvas = document.createElement('canvas')
+      const rasterContext = rasterCanvas.getContext('2d', { alpha: false })
+      if (!rasterContext) throw new Error('Canvas is unavailable')
+      rasterCanvas.width = Math.max(1, Math.floor(renderViewport.width))
+      rasterCanvas.height = Math.max(1, Math.floor(renderViewport.height))
+      await firstPage.render({
+        canvasContext: rasterContext,
+        viewport: renderViewport,
+        background: '#fff',
+      }).promise
+      if (selectionSequence === fileSelectionSequence) {
+        coverRasterCanvas = rasterCanvas
+        coverRendered.value = paintCoverCanvas()
       }
     }
-  } catch {
+  } catch (error) {
     if (selectionSequence !== fileSelectionSequence) return
+    console.error('PDF cover rendering failed:', error)
     fileSelectionError.value = '封面预览生成失败'
     if (!dimensionsRead) {
       coverRatio.value = 612 / 792
@@ -1960,13 +2108,7 @@ async function readPdfCover(file, selectionSequence) {
 
 async function startWorkflow() {
   if (!selectedFile.value || !coverPresentationReady.value || coverReading.value || workflowStarted.value || workflowRewinding.value) return
-  const baseName = customFileBaseName.value.trim()
-  if (!baseName) {
-    fileSelectionError.value = '请输入文件名称'
-    return
-  }
-  const fileName = normalizePdfFileName(baseName)
-  customFileName.value = fileName
+  const fileName = selectedFileName.value
 
   resetWorkflowState({ preserveDetail: true })
   fileSelectionError.value = ''
@@ -2101,7 +2243,7 @@ function handleFileSelection(event) {
       || 'contract-image'
     customFileName.value = normalizePdfFileName(baseName, 'contract-image')
   } else {
-    customFileName.value = normalizePdfFileName(file.name)
+    customFileName.value = file.name
   }
   selectedSourceKind.value = fileKind
   selectedFile.value = fileKind === 'pdf' ? file : null
@@ -2110,6 +2252,7 @@ function handleFileSelection(event) {
   coverReading.value = true
   coverRendered.value = false
   coverPresentationReady.value = false
+  coverRasterCanvas = null
   if (coverPresentationTimer !== null) {
     window.clearTimeout(coverPresentationTimer)
     coverPresentationTimer = null
@@ -2160,10 +2303,24 @@ function coreReviewInputValue(definitionCode, itemIndex, property) {
   return value ?? ''
 }
 
+function coreReviewValuePresent(value) {
+  return value !== null
+    && value !== undefined
+    && (typeof value !== 'string' || Boolean(value.trim()))
+}
+
+function coreReviewItemActive(definitionCode, itemIndex) {
+  const definition = coreDefinitions.value.find((item) => item.code === definitionCode)
+  const item = coreReviewModel.get(definitionCode)?.[itemIndex]
+  if (!definition || !item) return false
+  if (definition.cardinality === 'multiple') return true
+  return definition.properties.some((property) => coreReviewValuePresent(item[property.code]))
+}
+
 function coreReviewValueMissing(definitionCode, itemIndex, property) {
-  if (!property.required) return false
+  if (!property.required || !coreReviewItemActive(definitionCode, itemIndex)) return false
   const value = coreReviewModel.get(definitionCode)?.[itemIndex]?.[property.code]
-  return value === null || value === undefined || value === ''
+  return !coreReviewValuePresent(value)
 }
 
 function booleanReviewControlKey(definitionCode, itemIndex, propertyCode) {
@@ -2207,6 +2364,217 @@ function updateCoreReviewValue(definition, itemIndex, property, event) {
     ? rawValue === '' ? null : rawValue === 'true'
     : rawValue
   modifiedFields.add(coreReviewPath(definition.code, itemIndex, property.code))
+}
+
+function updateReviewFileName(event) {
+  reviewFileName.value = event.target.value
+  reviewFileNameModified.value = true
+}
+
+function serializeCoreProperty(value, type) {
+  if (value === null || value === undefined || (typeof value === 'string' && !value.trim())) return null
+  if (type === 'integer') return Number.parseInt(value, 10)
+  if (type === 'number') return Number(value)
+  if (type === 'boolean') return value === true || value === 'true'
+  return String(value)
+}
+
+function serializeCoreReview() {
+  return Object.fromEntries(coreDefinitions.value.map((definition) => {
+    const items = coreReviewModel.get(definition.code) || []
+    const serializedItems = items.map((item) => Object.fromEntries(
+      definition.properties
+        .map((property) => [
+          property.code,
+          serializeCoreProperty(item?.[property.code], property.type),
+          property.required,
+        ])
+        // 顶层 Core 空值使用 null；对象内部的可选空属性必须省略，否则后端会按类型错误拒绝。
+        .filter(([, value, required]) => required || value !== null)
+        .map(([code, value]) => [code, value]),
+    ))
+    if (definition.cardinality === 'multiple') {
+      return [definition.code, serializedItems.length ? serializedItems : null]
+    }
+    const item = serializedItems[0] || emptyCoreReviewItem(definition)
+    if (definition.properties.length === 1) {
+      return [definition.code, item[definition.properties[0].code]]
+    }
+    return [definition.code, Object.values(item).some((value) => value !== null) ? item : null]
+  }))
+}
+
+function validateIngestionDraft(core, clauses) {
+  const errors = []
+  const fileName = reviewFileName.value.trim()
+  if (!fileName) errors.push('请填写最终展示文件名')
+  if (fileName.length > 255) errors.push('最终展示文件名不能超过 255 个字符')
+  if (/[\\/:*?"<>|\r\n]/.test(fileName) || /^[ .]|[ .]$/.test(fileName)) {
+    errors.push('最终展示文件名包含不允许的字符，或以空格、句点开头或结尾')
+  }
+  for (const definition of coreDefinitions.value) {
+    const value = core[definition.code]
+    const items = definition.cardinality === 'multiple'
+      ? (Array.isArray(value) ? value : [])
+      : value === null ? [] : [definition.properties.length === 1 ? { [definition.properties[0].code]: value } : value]
+    for (const item of items) {
+      definition.properties.filter((property) => (
+        property.required && !coreReviewValuePresent(item?.[property.code])
+      )).forEach((property) => {
+        errors.push(`请填写“${definition.name}”中的必填项“${property.name}”`)
+      })
+    }
+  }
+  if (!clauses.length) errors.push('至少需要保留一条合同条款')
+  const pageCount = processedDocument.value?.pageCount
+  for (const [index, clause] of clauses.entries()) {
+    if (!clause.content.trim()) errors.push(`第 ${index + 1} 条条款正文不能为空`)
+    if (Number.isInteger(pageCount) && clause.end_page > pageCount) {
+      errors.push(`第 ${index + 1} 条条款页码不能超过处理版 PDF 的 ${pageCount} 页`)
+    }
+  }
+  return errors
+}
+
+function ingestionFieldLabel(location) {
+  const fields = Array.isArray(location) ? location.filter((item) => item !== 'body') : []
+  if (!fields.length) return '提交内容'
+  if (fields[0] === 'file_name') return '最终展示文件名'
+  if (fields[0] === 'core') {
+    const definition = coreDefinitions.value.find((item) => item.code === fields[1])
+    const propertyCode = fields.find((item) => typeof item === 'string' && definition?.properties.some((property) => property.code === item))
+    const property = definition?.properties.find((item) => item.code === propertyCode)
+    return [definition?.name || '核心字段', property?.name].filter(Boolean).join('的')
+  }
+  if (fields[0] === 'clauses') {
+    const clauseIndex = fields.find((item) => Number.isInteger(item))
+    const clauseField = {
+      clause_id: '条款 ID', order: '顺序', identifier: '原文编号', title: '标题', path: '层级路径',
+      parent_clause_id: '父条款', level: '层级', start_page: '起始页', end_page: '结束页', content: '正文',
+    }[fields.at(-1)]
+    const clauseLabel = Number.isInteger(clauseIndex) ? `第 ${clauseIndex + 1} 条条款` : '合同条款'
+    return [clauseLabel, clauseField].filter(Boolean).join('的')
+  }
+  return '提交内容'
+}
+
+function localizedIngestionDetail(detail) {
+  const label = ingestionFieldLabel(detail?.loc)
+  const type = detail?.type || ''
+  if (type === 'missing') return `${label}不能为空`
+  if (type === 'extra_forbidden') return `${label}包含不允许提交的字段`
+  if (type.includes('string_too_short')) return `${label}不能为空`
+  if (type.includes('string_too_long')) return `${label}长度超过允许范围`
+  if (type.includes('int_')) return `${label}必须填写整数`
+  if (type.includes('float_') || type.includes('number_')) return `${label}必须填写有效数字`
+  if (type.includes('bool_')) return `${label}必须选择“是”或“否”`
+  if (type === 'greater_than_equal') return `${label}不能小于允许的最小值`
+  if (type === 'less_than_equal') return `${label}不能超过允许的最大值`
+  if (type === 'list_type') return `${label}必须是列表`
+  if (type === 'dict_type') return `${label}必须是完整对象`
+
+  const message = typeof detail?.msg === 'string' ? detail.msg.trim() : ''
+  const normalizedMessage = message.replace(/^Value error,\s*/i, '')
+  if (normalizedMessage && !/[A-Za-z_]{3,}/.test(normalizedMessage)) {
+    return `${label}：${normalizedMessage}`
+  }
+  return `${label}格式不符合入库要求，请检查后重试`
+}
+
+function ingestionFailureMessages(error) {
+  const details = error?.payload?.detail
+  if (Array.isArray(details)) {
+    const detailsByField = new Map()
+    details.forEach((detail) => {
+      const label = ingestionFieldLabel(detail?.loc)
+      const fieldDetails = detailsByField.get(label) || []
+      fieldDetails.push(detail)
+      detailsByField.set(label, fieldDetails)
+    })
+    const messages = [...detailsByField.entries()].map(([label, fieldDetails]) => {
+      if (fieldDetails.length === 1) return localizedIngestionDetail(fieldDetails[0])
+      const missingDetail = fieldDetails.find((detail) => (
+        detail?.type === 'missing' || detail?.type === 'string_too_short'
+      ))
+      if (missingDetail) return localizedIngestionDetail(missingDetail)
+      return `${label}的值或数据类型不符合入库要求，请检查后重试`
+    }).filter(Boolean)
+    if (messages.length) return messages
+  }
+  const genericMessages = {
+    404: '处理任务不存在、已经过期、已经入库，或当前用户无权操作',
+    409: '仍有业务阶段或入库所需结果尚未成功，请等待处理完成或重试失败阶段',
+    422: '最终文件名、Core 或条款不符合入库要求，请检查表单内容',
+    502: '处理版 PDF 或合同索引写入失败，审核内容已保留，可以重新入库',
+  }
+  const fallbackMessage = typeof error?.message === 'string' && !/[A-Za-z_]{3,}/.test(error.message)
+    ? error.message
+    : '网络请求异常，请检查连接后重新入库'
+  return [genericMessages[error?.status] || fallbackMessage]
+}
+
+function clearIngestionErrors() {
+  if (ingestionErrorTimer !== null) window.clearTimeout(ingestionErrorTimer)
+  ingestionErrorTimer = null
+  ingestionErrors.value = []
+}
+
+function showIngestionErrors(errors) {
+  clearIngestionErrors()
+  ingestionErrors.value = [...new Set(errors.filter(Boolean))]
+  if (!ingestionErrors.value.length) return
+  ingestionErrorTimer = window.setTimeout(() => {
+    ingestionErrorTimer = null
+    ingestionErrors.value = []
+  }, 8000)
+}
+
+async function submitIngestion() {
+  if (!canIngestResult.value) return
+  const core = serializeCoreReview()
+  const clauses = draftClauses.value.map((clause, index) => ({
+    clause_id: clause.clause_id,
+    order: index + 1,
+    identifier: clause.identifier,
+    title: clause.title ?? null,
+    path: Array.isArray(clause.path) ? [...clause.path] : [],
+    parent_clause_id: clause.parent_clause_id ?? null,
+    level: clause.level,
+    start_page: clause.start_page,
+    end_page: clause.end_page,
+    content: clauseEditableContent(clause),
+  }))
+  const validationErrors = validateIngestionDraft(core, clauses)
+  if (validationErrors.length) {
+    showIngestionErrors(validationErrors)
+    return
+  }
+
+  const runId = currentRunId.value
+  const controller = new AbortController()
+  ingestionRequestController = controller
+  ingestionPending.value = true
+  clearIngestionErrors()
+  try {
+    const receipt = await ingestExtractionRun(runId, {
+      file_name: reviewFileName.value.trim(),
+      core,
+      clauses,
+    }, { signal: controller.signal })
+    if (ingestionRequestController !== controller || currentRunId.value !== runId) return
+    ingestionReceipt.value = receipt
+    currentRunStatus.value = 'ingested'
+    workflowRunning.value = false
+    extractionRuns.value = extractionRuns.value.filter((run) => run.run_id !== runId)
+    eventStreamController?.abort()
+  } catch (error) {
+    if (error?.name !== 'AbortError') showIngestionErrors(ingestionFailureMessages(error))
+  } finally {
+    if (ingestionRequestController === controller) {
+      ingestionRequestController = null
+      ingestionPending.value = false
+    }
+  }
 }
 
 function addCoreReviewItem(definition) {
@@ -2269,10 +2637,254 @@ function clauseEditingId(clause) {
   return String(clause.clause_id || clause.order)
 }
 
+function resetNewClauseForm() {
+  Object.assign(newClauseForm, {
+    path: [''],
+    startPage: 1,
+    endPage: 1,
+    content: '',
+  })
+  clauseInsertError.value = ''
+}
+
+async function openClauseInsert(index) {
+  if (clauseFormAnimating.value) return
+  const slot = document.querySelector(`[data-clause-insert-index="${index}"]`)
+  const collapsedHeight = slot instanceof HTMLElement ? slot.getBoundingClientRect().height : 18
+  clauseInsertCollapsedHeight.value = collapsedHeight
+  resetNewClauseForm()
+  clauseInsertIndex.value = index
+  await nextTick()
+  const expandedSlot = document.querySelector(`[data-clause-insert-index="${index}"]`)
+  const form = expandedSlot?.querySelector('.clause-insert-form')
+  if (!(expandedSlot instanceof HTMLElement) || !(form instanceof HTMLElement)) return
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+
+  clauseFormAnimating.value = true
+  const expandedHeight = expandedSlot.getBoundingClientRect().height
+  expandedSlot.style.overflow = 'hidden'
+  await Promise.all([
+    expandedSlot.animate([
+      { height: `${collapsedHeight}px` },
+      { height: `${expandedHeight}px` },
+    ], { duration: 420, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' }).finished.catch(() => {}),
+    form.animate([
+      { opacity: 0, filter: 'blur(4px)', transform: 'translateY(-8px) scale(0.99)' },
+      { opacity: 1, filter: 'blur(0)', transform: 'translateY(0) scale(1)' },
+    ], { duration: 360, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' }).finished.catch(() => {}),
+  ])
+  expandedSlot.style.overflow = ''
+  clauseFormAnimating.value = false
+}
+
+async function cancelClauseInsert() {
+  if (!Number.isInteger(clauseInsertIndex.value)) return
+  const index = clauseInsertIndex.value
+  const slot = document.querySelector(`[data-clause-insert-index="${index}"]`)
+  const form = slot?.querySelector('.clause-insert-form')
+  let slotAnimation = null
+  let formAnimation = null
+  if (
+    !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    && slot instanceof HTMLElement
+    && form instanceof HTMLElement
+  ) {
+    clauseFormAnimating.value = true
+    const expandedHeight = slot.getBoundingClientRect().height
+    slot.style.overflow = 'hidden'
+    slotAnimation = slot.animate([
+      { height: `${expandedHeight}px` },
+      { height: `${clauseInsertCollapsedHeight.value}px` },
+    ], {
+      duration: 360,
+      easing: 'cubic-bezier(0.4, 0, 0.2, 1)',
+      fill: 'forwards',
+    })
+    formAnimation = form.animate([
+      { opacity: 1, filter: 'blur(0)', transform: 'translateY(0) scale(1)' },
+      { opacity: 0, filter: 'blur(3px)', transform: 'translateY(-7px) scale(0.99)' },
+    ], { duration: 260, easing: 'ease', fill: 'forwards' })
+    await Promise.all([
+      slotAnimation.finished.catch(() => {}),
+      formAnimation.finished.catch(() => {}),
+    ])
+  }
+  clauseInsertIndex.value = null
+  await nextTick()
+  slotAnimation?.cancel()
+  formAnimation?.cancel()
+  if (slot instanceof HTMLElement) slot.style.overflow = ''
+  resetNewClauseForm()
+  clauseFormAnimating.value = false
+}
+
+function createManualClauseId() {
+  const occupiedIds = new Set(draftClauses.value.map((clause) => clause.clause_id))
+  let sequence = 1
+  let candidate = ''
+  do {
+    candidate = `clause-manual-${String(sequence).padStart(4, '0')}`
+    sequence += 1
+  } while (occupiedIds.has(candidate))
+  return candidate
+}
+
+function addClausePathItem() {
+  newClauseForm.path.push('')
+}
+
+function removeClausePathItem(index) {
+  if (newClauseForm.path.length === 1) return
+  newClauseForm.path.splice(index, 1)
+}
+
+function useClauseSymbolPath(index) {
+  const value = newClauseForm.path[index].trim()
+  if (!value.startsWith('◆')) newClauseForm.path[index] = `◆${value ? ` ${value}` : ''}`
+}
+
+function sameClausePath(left, right) {
+  return Array.isArray(left)
+    && left.length === right.length
+    && left.every((item, index) => item === right[index])
+}
+
+function clauseIdentityFromPath(pathLabel) {
+  const identifierMatch = pathLabel.match(/^(第.+?[章节条款项]|\d+(?:\.\d+)*|\([^)]+\)|（[^）]+）|◆)(?:\s+|$)/)
+  if (!identifierMatch) return { identifier: '◆', title: pathLabel }
+
+  const identifier = identifierMatch[1]
+  const title = pathLabel.slice(identifierMatch[0].length).trim()
+  return { identifier, title: title || null }
+}
+
+async function addManualClause() {
+  if (!Number.isInteger(clauseInsertIndex.value)) return
+  const insertionIndex = clauseInsertIndex.value
+
+  const content = newClauseForm.content.trim()
+  const path = newClauseForm.path.map((item) => item.trim())
+  const startPage = Number(newClauseForm.startPage)
+  const endPage = Number(newClauseForm.endPage)
+  const parentPath = path.slice(0, -1)
+  const parentClause = parentPath.length
+    ? draftClauses.value.find((clause) => sameClausePath(clause.path, parentPath))
+    : null
+
+  if (path.some((item) => !item)) clauseInsertError.value = '请完整填写每一级条款路径'
+  else if (!Number.isInteger(startPage) || startPage < 1) clauseInsertError.value = '起始页必须是从 1 开始的整数'
+  else if (!Number.isInteger(endPage) || endPage < startPage) clauseInsertError.value = '结束页必须是不小于起始页的整数'
+  else if (!content) clauseInsertError.value = '请填写条款正文'
+  else clauseInsertError.value = ''
+  if (clauseInsertError.value) return
+  const { identifier, title } = clauseIdentityFromPath(path.at(-1))
+
+  const clause = {
+    clause_id: createManualClauseId(),
+    order: insertionIndex + 1,
+    identifier,
+    title: title || null,
+    path,
+    parent_clause_id: parentClause?.clause_id ?? null,
+    level: path.length,
+    start_page: startPage,
+    end_page: endPage,
+    content,
+  }
+
+  await cancelClauseInsert()
+  clauseReviewModel.value.splice(insertionIndex, 0, clause)
+  clauseReviewModel.value = clauseReviewModel.value.map((item, index) => ({
+    ...item,
+    order: index + 1,
+  }))
+  clausesLocallyModified.value = true
+  modifiedFields.add('clause:$items')
+  await animateClauseInsertion(clause.clause_id)
+}
+
+async function animateClauseInsertion(clauseId) {
+  await nextTick()
+  const list = clauseReviewListRef.value
+  if (!(list instanceof HTMLElement)) return
+  const element = [...list.children].find((candidate) => (
+    candidate instanceof HTMLElement && candidate.dataset.clauseId === clauseId
+  ))
+  if (!(element instanceof HTMLElement)) return
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+
+  const height = element.getBoundingClientRect().height
+  const marginBottom = Number.parseFloat(window.getComputedStyle(element).marginBottom) || 0
+  element.style.overflow = 'hidden'
+  await element.animate([
+    { height: '0px', marginBottom: '0px', opacity: 0, filter: 'blur(4px)', transform: 'translateY(-9px) scale(0.985)' },
+    { height: `${height}px`, marginBottom: `${marginBottom}px`, opacity: 1, filter: 'blur(0)', transform: 'translateY(0) scale(1)' },
+  ], {
+    duration: 480,
+    easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+  }).finished.catch(() => {})
+  element.style.overflow = ''
+}
+
 function toggleClauseEditing(clause) {
   const id = clauseEditingId(clause)
   if (editingClauseIds.has(id)) editingClauseIds.delete(id)
   else editingClauseIds.add(id)
+}
+
+async function removeClause(clause) {
+  if (removingClauseIds.size) return
+  const removedIds = new Set([clause.clause_id])
+  let foundDescendant = true
+  while (foundDescendant) {
+    foundDescendant = false
+    draftClauses.value.forEach((candidate) => {
+      if (!removedIds.has(candidate.clause_id) && removedIds.has(candidate.parent_clause_id)) {
+        removedIds.add(candidate.clause_id)
+        foundDescendant = true
+      }
+    })
+  }
+
+  await cancelClauseInsert()
+  removedIds.forEach((clauseId) => removingClauseIds.add(clauseId))
+  await animateClauseRemoval(removedIds)
+  if (![...removedIds].every((clauseId) => removingClauseIds.has(clauseId))) return
+
+  removedIds.forEach((clauseId) => {
+    editingClauseIds.delete(String(clauseId))
+    draftOverrides.delete(`clause:${clauseId}`)
+  })
+  clauseReviewModel.value = draftClauses.value
+    .filter((candidate) => !removedIds.has(candidate.clause_id))
+    .map((candidate, index) => ({ ...candidate, order: index + 1 }))
+  clausesLocallyModified.value = true
+  modifiedFields.add('clause:$items')
+  removingClauseIds.clear()
+}
+
+async function animateClauseRemoval(removedIds) {
+  const list = clauseReviewListRef.value
+  if (!(list instanceof HTMLElement)) return
+
+  const shells = [...list.children].filter((element) => (
+    element instanceof HTMLElement && removedIds.has(element.dataset.clauseId)
+  ))
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+
+  await Promise.all(shells.map((element) => {
+    const height = element.getBoundingClientRect().height
+    const marginBottom = Number.parseFloat(window.getComputedStyle(element).marginBottom) || 0
+    element.style.overflow = 'hidden'
+    return element.animate([
+      { height: `${height}px`, marginBottom: `${marginBottom}px`, opacity: 1, filter: 'blur(0)', transform: 'translateY(0) scale(1)' },
+      { height: '0px', marginBottom: '0px', opacity: 0, filter: 'blur(4px)', transform: 'translateY(-9px) scale(0.985)' },
+    ], {
+      duration: 480,
+      easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+      fill: 'forwards',
+    }).finished.catch(() => {})
+  }))
 }
 
 function clausePageLabel(clause) {
@@ -2325,7 +2937,9 @@ function handleBooleanReviewOutsidePointer(event) {
   openBooleanControlKey.value = ''
 }
 
-onMounted(() => {
+function activateIngestionView() {
+  if (viewActive) return
+  viewActive = true
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('pointerdown', handleBooleanReviewOutsidePointer)
   window.addEventListener('resize', scheduleWorkflowScrollExtension)
@@ -2333,12 +2947,42 @@ onMounted(() => {
   elapsedClockTimer = window.setInterval(() => {
     elapsedClock.value = Date.now()
   }, 31)
-  loadPdfRuntime()
-    .then(({ workerSrc }) => fetch(workerSrc).then((response) => response.arrayBuffer()))
-    .catch(() => {})
+  startRunsRefreshTimer()
+  if (candidatePreviewUrl.value) emit('visual-pause-change', true)
+  scheduleWorkflowScrollExtension()
+  if (coverRasterCanvas) {
+    nextTick(() => {
+      if (paintCoverCanvas()) coverRendered.value = true
+    })
+  }
+}
+
+function deactivateIngestionView() {
+  if (!viewActive) return
+  viewActive = false
+  window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('pointerdown', handleBooleanReviewOutsidePointer)
+  window.removeEventListener('resize', scheduleWorkflowScrollExtension)
+  if (elapsedClockTimer !== null) window.clearInterval(elapsedClockTimer)
+  elapsedClockTimer = null
+  stopRunsRefreshTimer()
+  emit('visual-pause-change', false)
+}
+
+onMounted(() => {
+  if (props.active) activateIngestionView()
+  loadPdfRuntime().catch(() => {})
+})
+
+onActivated(activateIngestionView)
+onDeactivated(deactivateIngestionView)
+watch(() => props.active, (active) => {
+  if (active) activateIngestionView()
+  else deactivateIngestionView()
 })
 
 onBeforeUnmount(() => {
+  deactivateIngestionView()
   stopExtractionNetwork()
   cancellationRequestController?.abort()
   cancellationRequestController = null
@@ -2346,8 +2990,7 @@ onBeforeUnmount(() => {
   runRestoreController = null
   closeCandidatePreview()
   closeRunsPanel()
-  if (runsRefreshTimer !== null) window.clearInterval(runsRefreshTimer)
-  runsRefreshTimer = null
+  stopRunsRefreshTimer()
   clearTimers()
   if (deduplicationRefreshTimer !== null) window.clearTimeout(deduplicationRefreshTimer)
   if (elapsedClockTimer !== null) window.clearInterval(elapsedClockTimer)
@@ -2355,11 +2998,11 @@ onBeforeUnmount(() => {
   if (workflowSwitchTimer !== null) window.clearTimeout(workflowSwitchTimer)
   workflowSwitchTimer = null
   fileSelectionSequence += 1
-  window.removeEventListener('keydown', handleKeydown)
-  window.removeEventListener('pointerdown', handleBooleanReviewOutsidePointer)
-  window.removeEventListener('resize', scheduleWorkflowScrollExtension)
   if (workflowScrollExtensionFrame !== null) window.cancelAnimationFrame(workflowScrollExtensionFrame)
   workflowScrollExtensionFrame = null
+  pdfWorkerPort?.terminate()
+  pdfWorkerPort = null
+  pdfRuntimePromise = null
 })
 </script>
 
@@ -2402,7 +3045,7 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="contract-new-trigger"
-          :disabled="workflowSwitching || cancellationPending"
+          :disabled="newExtractionDisabled"
           aria-label="新建合同提取任务"
           @click="createNewExtractionWorkflow"
         >
@@ -2603,7 +3246,7 @@ onBeforeUnmount(() => {
 
         <svg
           class="workflow-links"
-          viewBox="0 0 2090 620"
+          viewBox="0 0 2380 620"
           preserveAspectRatio="none"
           aria-hidden="true"
         >
@@ -2612,7 +3255,7 @@ onBeforeUnmount(() => {
               id="flow-glow"
               x="-120"
               y="-120"
-              width="2330"
+              width="2620"
               height="860"
               filterUnits="userSpaceOnUse"
               color-interpolation-filters="sRGB"
@@ -2646,36 +3289,42 @@ onBeforeUnmount(() => {
             <path class="workflow-link__comet" pathLength="100" d="M1130 321 C1150 321 1170 321 1190 321" />
           </g>
 
-          <g class="workflow-link" :class="`is-${edgeState('field')}`">
-            <path class="workflow-link__bed" d="M1420 321 C1450 321 1440 144 1480 144" />
-            <path class="workflow-link__signal" pathLength="100" d="M1420 321 C1450 321 1440 144 1480 144" />
-            <path class="workflow-link__comet" pathLength="100" d="M1420 321 C1450 321 1440 144 1480 144" />
-          </g>
-          <g class="workflow-link" :class="`is-${edgeState('clause')}`">
+          <g class="workflow-link" :class="`is-${edgeState('naming')}`">
             <path class="workflow-link__bed" d="M1420 321 C1440 321 1460 321 1480 321" />
             <path class="workflow-link__signal" pathLength="100" d="M1420 321 C1440 321 1460 321 1480 321" />
             <path class="workflow-link__comet" pathLength="100" d="M1420 321 C1440 321 1460 321 1480 321" />
           </g>
+
+          <g class="workflow-link" :class="`is-${edgeState('field')}`">
+            <path class="workflow-link__bed" d="M1750 321 C1770 321 1750 144 1770 144" />
+            <path class="workflow-link__signal" pathLength="100" d="M1750 321 C1770 321 1750 144 1770 144" />
+            <path class="workflow-link__comet" pathLength="100" d="M1750 321 C1770 321 1750 144 1770 144" />
+          </g>
+          <g class="workflow-link" :class="`is-${edgeState('clause')}`">
+            <path class="workflow-link__bed" d="M1750 321 C1757 321 1763 321 1770 321" />
+            <path class="workflow-link__signal" pathLength="100" d="M1750 321 C1757 321 1763 321 1770 321" />
+            <path class="workflow-link__comet" pathLength="100" d="M1750 321 C1757 321 1763 321 1770 321" />
+          </g>
           <g class="workflow-link" :class="`is-${edgeState('retrieval')}`">
-            <path class="workflow-link__bed" d="M1420 321 C1450 321 1440 498 1480 498" />
-            <path class="workflow-link__signal" pathLength="100" d="M1420 321 C1450 321 1440 498 1480 498" />
-            <path class="workflow-link__comet" pathLength="100" d="M1420 321 C1450 321 1440 498 1480 498" />
+            <path class="workflow-link__bed" d="M1750 321 C1770 321 1750 498 1770 498" />
+            <path class="workflow-link__signal" pathLength="100" d="M1750 321 C1770 321 1750 498 1770 498" />
+            <path class="workflow-link__comet" pathLength="100" d="M1750 321 C1770 321 1750 498 1770 498" />
           </g>
 
           <g class="workflow-link" :class="`is-${resultEdgeState('field')}`">
-            <path class="workflow-link__bed" d="M1750 144 C1790 144 1780 321 1820 321" />
-            <path class="workflow-link__signal" pathLength="100" d="M1750 144 C1790 144 1780 321 1820 321" />
-            <path class="workflow-link__comet" pathLength="100" d="M1750 144 C1790 144 1780 321 1820 321" />
+            <path class="workflow-link__bed" d="M2040 144 C2080 144 2070 321 2110 321" />
+            <path class="workflow-link__signal" pathLength="100" d="M2040 144 C2080 144 2070 321 2110 321" />
+            <path class="workflow-link__comet" pathLength="100" d="M2040 144 C2080 144 2070 321 2110 321" />
           </g>
           <g class="workflow-link" :class="`is-${resultEdgeState('clause')}`">
-            <path class="workflow-link__bed" d="M1750 321 C1775 321 1795 321 1820 321" />
-            <path class="workflow-link__signal" pathLength="100" d="M1750 321 C1775 321 1795 321 1820 321" />
-            <path class="workflow-link__comet" pathLength="100" d="M1750 321 C1775 321 1795 321 1820 321" />
+            <path class="workflow-link__bed" d="M2040 321 C2065 321 2085 321 2110 321" />
+            <path class="workflow-link__signal" pathLength="100" d="M2040 321 C2065 321 2085 321 2110 321" />
+            <path class="workflow-link__comet" pathLength="100" d="M2040 321 C2065 321 2085 321 2110 321" />
           </g>
           <g class="workflow-link" :class="`is-${resultEdgeState('retrieval')}`">
-            <path class="workflow-link__bed" d="M1750 498 C1790 498 1780 321 1820 321" />
-            <path class="workflow-link__signal" pathLength="100" d="M1750 498 C1790 498 1780 321 1820 321" />
-            <path class="workflow-link__comet" pathLength="100" d="M1750 498 C1790 498 1780 321 1820 321" />
+            <path class="workflow-link__bed" d="M2040 498 C2080 498 2070 321 2110 321" />
+            <path class="workflow-link__signal" pathLength="100" d="M2040 498 C2080 498 2070 321 2110 321" />
+            <path class="workflow-link__comet" pathLength="100" d="M2040 498 C2080 498 2070 321 2110 321" />
           </g>
         </svg>
 
@@ -2986,43 +3635,27 @@ onBeforeUnmount(() => {
       @after-enter="handleDetailAfterEnter"
       @after-leave="handleDetailAfterLeave"
     >
-      <aside
+      <div
         v-if="detailMode"
         ref="detailPanel"
+        class="ingestion-detail-shell"
+        :class="[
+          `is-${detailMode}`,
+          { 'is-classification': detailMode === 'stage' && selectedStageId === 'classification' },
+        ]"
+      >
+      <aside
         class="ingestion-detail"
         :class="[
           `is-${detailMode}`,
           { 'is-classification': detailMode === 'stage' && selectedStageId === 'classification' },
         ]"
       >
-        <button type="button" class="ingestion-detail__close" aria-label="关闭详情" @click="closeDetail">
+        <button v-if="detailMode !== 'result'" type="button" class="ingestion-detail__close" aria-label="关闭详情" @click="closeDetail">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
         </button>
 
         <template v-if="detailMode === 'input'">
-          <label
-            class="ingestion-detail__file-name is-heading"
-          >
-            <span>输入文件名称</span>
-            <div
-              :class="{
-                'ingestion-detail__file-name-field': true,
-                'is-invalid': !inputFileNameLocked && !customFileBaseName.trim(),
-                'is-locked': inputFileNameLocked,
-              }"
-            >
-              <input
-                :value="inputFileNameValue"
-                maxlength="251"
-                :readonly="inputFileNameLocked"
-                :aria-readonly="inputFileNameLocked"
-                @input="updateSelectedFileName"
-              />
-              <span aria-hidden="true">.pdf</span>
-            </div>
-            <small v-if="inputFileNameLocked">处理已开始，文件名称已锁定</small>
-            <small v-else>{{ customFileBaseName.trim() ? '可修改主文件名，.pdf 后缀已锁定' : '文件名称不能为空' }}</small>
-          </label>
           <dl class="ingestion-detail__facts">
             <div><dt>文件类型</dt><dd>{{ selectedFileTypeLabel }}</dd></div>
             <div><dt>文件大小</dt><dd>{{ selectedFileSize }}</dd></div>
@@ -3229,6 +3862,35 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
+          <section
+            v-if="selectedStage.id === 'naming' && selectedStage.status === 'succeeded'"
+            class="classification-stage-result naming-stage-result"
+          >
+            <template v-if="suggestedFileName">
+              <header class="classification-stage-result__header">
+                <div>
+                  <small>建议名称</small>
+                  <strong>{{ suggestedFileName.file_name }}</strong>
+                </div>
+              </header>
+              <div class="classification-stage-result__description">
+                <span>命名依据</span>
+                <p>{{ suggestedFileName.reasoning }}</p>
+              </div>
+              <div v-if="suggestedFileName.evidence?.length" class="classification-stage-result__categories">
+                <article v-for="(evidence, index) in suggestedFileName.evidence" :key="`${evidence.page_number}-${index}`">
+                  <div>
+                    <h4>第 {{ evidence.page_number }} 页</h4>
+                    <p>{{ evidence.content }}</p>
+                  </div>
+                </article>
+              </div>
+            </template>
+            <div v-else class="classification-stage-result__unavailable">
+              建议名称阶段已经完成，但当前快照没有返回可展示的命名详情。
+            </div>
+          </section>
+
           <div
             v-if="selectedStage.id === 'detection' && documentDetection"
             class="document-detection-result"
@@ -3278,6 +3940,21 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="extraction-result-editor">
+            <section class="extraction-result-section extraction-result-section--file-name">
+              <header><strong>合同名称</strong><span>最终展示名称</span></header>
+              <label class="extraction-result-file-name">
+                <span>文件名主体<b>必填</b></span>
+                <input
+                  type="text"
+                  maxlength="255"
+                  :value="reviewFileName"
+                  :disabled="Boolean(ingestionReceipt)"
+                  placeholder="请输入最终展示文件名（无需扩展名）"
+                  @input="updateReviewFileName"
+                />
+                <small>由模型建议，可在正式入库前修改；无需填写 .pdf 扩展名。</small>
+              </label>
+            </section>
             <section v-if="coreReviewFields.length" class="extraction-result-section">
               <header>
                 <strong>核心字段</strong>
@@ -3298,7 +3975,7 @@ onBeforeUnmount(() => {
                     v-if="field.cardinality === 'single' && field.properties.length === 1"
                     class="extraction-result-item__title-meta"
                   >
-                    <b v-if="field.properties[0].required">必填</b>
+                    <b v-if="field.properties[0].required">对象内必填</b>
                     <i
                       v-if="modifiedFields.has(coreReviewPath(field.code, 0, field.properties[0].code))"
                     >已修改</i>
@@ -3331,7 +4008,7 @@ onBeforeUnmount(() => {
                     }"
                   >
                     <span v-if="field.cardinality === 'multiple' || field.properties.length > 1">
-                      {{ property.name }}<b v-if="property.required">必填</b>
+                      {{ property.name }}<b v-if="property.required">对象内必填</b>
                       <i v-if="modifiedFields.has(coreReviewPath(field.code, itemIndex, property.code))">已修改</i>
                     </span>
                     <div
@@ -3392,7 +4069,7 @@ onBeforeUnmount(() => {
                         type="number"
                         :step="corePropertyStep(property.type)"
                         :value="coreReviewInputValue(field.code, itemIndex, property)"
-                        :required="property.required"
+                        :required="property.required && coreReviewItemActive(field.code, itemIndex)"
                         :placeholder="`请输入${property.name}`"
                         @input="updateCoreReviewValue(field, itemIndex, property, $event)"
                       />
@@ -3419,7 +4096,7 @@ onBeforeUnmount(() => {
                       v-else
                       type="text"
                       :value="coreReviewInputValue(field.code, itemIndex, property)"
-                      :required="property.required"
+                      :required="property.required && coreReviewItemActive(field.code, itemIndex)"
                       :placeholder="`请输入${property.name}`"
                       @input="updateCoreReviewValue(field, itemIndex, property, $event)"
                     />
@@ -3443,52 +4120,182 @@ onBeforeUnmount(() => {
               </article>
             </section>
 
-            <section v-if="draftClauses.length" class="extraction-result-section">
+            <section v-if="clauseReviewAvailable" class="extraction-result-section extraction-result-section--clauses">
               <header><strong>合同条款</strong><span>{{ draftClauses.length }} 条</span></header>
-              <article v-for="clause in draftClauses" :key="clause.clause_id" class="extraction-result-item">
-                <div class="extraction-result-item__heading">
-                  <h4>{{ clause.title || clause.identifier || `条款 ${clause.order}` }}</h4>
-                  <div class="extraction-result-item__clause-actions">
-                    <span v-if="clausePageLabel(clause)">{{ clausePageLabel(clause) }}</span>
-                    <button type="button" @click="toggleClauseEditing(clause)">
-                      {{ editingClauseIds.has(clauseEditingId(clause)) ? '完成' : '编辑' }}
-                    </button>
+              <div
+                ref="clauseReviewListRef"
+                class="clause-review-list"
+              >
+                <div
+                  v-for="(clause, clauseIndex) in draftClauses"
+                  :key="clause.clause_id"
+                  class="clause-review-item-shell"
+                  :class="{ 'is-removing': removingClauseIds.has(clause.clause_id) }"
+                  :data-clause-id="clause.clause_id"
+                >
+                  <div class="clause-review-item-shell__content">
+                <div
+                  class="clause-insert-slot"
+                  :class="{ 'is-open': clauseInsertIndex === clauseIndex }"
+                  :data-clause-insert-index="clauseIndex"
+                >
+                  <button
+                    v-if="clauseInsertIndex !== clauseIndex"
+                    type="button"
+                    class="clause-insert-slot__trigger"
+                    :aria-label="clauseIndex === 0 ? '在第一条条款前新增' : '在相邻条款之间新增'"
+                    @click.stop="openClauseInsert(clauseIndex)"
+                  >
+                    <span>＋</span><i>{{ clauseIndex === 0 ? '在开头新增' : '在此新增条款' }}</i>
+                  </button>
+                  <form v-else class="clause-insert-form" @submit.prevent.stop="addManualClause">
+                    <header><strong>新增条款</strong><span>插入为第 {{ clauseIndex + 1 }} 条</span></header>
+                    <fieldset class="clause-path-editor">
+                      <legend>完整层级路径 <b>必填</b></legend>
+                      <div v-for="(_, pathIndex) in newClauseForm.path" :key="pathIndex" class="clause-path-editor__item">
+                        <span>{{ pathIndex + 1 }}</span>
+                        <input v-model="newClauseForm.path[pathIndex]" type="text" :placeholder="pathIndex === newClauseForm.path.length - 1 ? '当前条款，例如：10.1 首付款' : '上级路径，例如：第三章 付款与结算'" />
+                        <button type="button" title="使用特殊符号作为编号" @click.stop="useClauseSymbolPath(pathIndex)">◆</button>
+                        <button type="button" :disabled="newClauseForm.path.length === 1" @click.stop="removeClausePathItem(pathIndex)">移除</button>
+                      </div>
+                      <button type="button" class="clause-path-editor__add" @click.stop="addClausePathItem">＋ 新增一级路径</button>
+                    </fieldset>
+                    <div class="clause-insert-form__row clause-insert-form__row--pages">
+                      <label><span>起始页<b>必填</b></span><input v-model.number="newClauseForm.startPage" type="number" min="1" step="1" /></label>
+                      <label><span>结束页<b>必填</b></span><input v-model.number="newClauseForm.endPage" type="number" min="1" step="1" /></label>
+                    </div>
+                    <label><span>条款正文<b>必填</b></span><textarea v-model="newClauseForm.content" placeholder="请输入完整条款正文"></textarea></label>
+                    <p v-if="clauseInsertError" class="clause-insert-form__error">{{ clauseInsertError }}</p>
+                    <footer>
+                      <button type="button" @click.stop="cancelClauseInsert">取消</button>
+                      <button type="submit">确认新增</button>
+                    </footer>
+                  </form>
+                </div>
+                <article class="extraction-result-item">
+                  <div class="extraction-result-item__heading">
+                    <h4>{{ clause.identifier || clause.title || `条款 ${clause.order}` }}</h4>
+                    <div class="extraction-result-item__clause-actions">
+                      <span v-if="clausePageLabel(clause)">{{ clausePageLabel(clause) }}</span>
+                      <button type="button" @click="toggleClauseEditing(clause)">
+                        {{ editingClauseIds.has(clauseEditingId(clause)) ? '完成' : '编辑' }}
+                      </button>
+                      <button
+                        type="button"
+                        class="is-danger"
+                        :aria-label="`删除条款：${clause.identifier || clause.title || clause.order}`"
+                        @click.stop="removeClause(clause)"
+                      >删除</button>
+                    </div>
+                  </div>
+                  <textarea
+                    v-if="editingClauseIds.has(clauseEditingId(clause))"
+                    :value="clauseEditableContent(clause)"
+                    @input="updateDraftValue(clauseValuePath(clause), $event)"
+                  ></textarea>
+                  <MarkdownMessage
+                    v-else-if="clauseEditableContent(clause)"
+                    class="extraction-result-item__markdown"
+                    :content="clauseEditableContent(clause)"
+                  />
+                  <button
+                    v-else
+                    type="button"
+                    class="extraction-result-item__markdown-empty"
+                    @click="toggleClauseEditing(clause)"
+                  >
+                    暂无条款正文，点击补充
+                  </button>
+                </article>
                   </div>
                 </div>
-                <textarea
-                  v-if="editingClauseIds.has(clauseEditingId(clause))"
-                  :value="clauseEditableContent(clause)"
-                  @input="updateDraftValue(clauseValuePath(clause), $event)"
-                ></textarea>
-                <MarkdownMessage
-                  v-else-if="clauseEditableContent(clause)"
-                  class="extraction-result-item__markdown"
-                  :content="clauseEditableContent(clause)"
-                />
+              </div>
+              <div
+                class="clause-insert-slot clause-insert-slot--last"
+                :class="{ 'is-open': clauseInsertIndex === draftClauses.length }"
+                :data-clause-insert-index="draftClauses.length"
+              >
                 <button
-                  v-else
+                  v-if="clauseInsertIndex !== draftClauses.length"
                   type="button"
-                  class="extraction-result-item__markdown-empty"
-                  @click="toggleClauseEditing(clause)"
+                  class="clause-insert-slot__trigger"
+                  :aria-label="draftClauses.length ? '在最后一条条款后新增' : '新增第一条条款'"
+                  @click.stop="openClauseInsert(draftClauses.length)"
                 >
-                  暂无条款正文，点击补充
+                  <span>＋</span><i>{{ draftClauses.length ? '在末尾新增' : '新增第一条条款' }}</i>
                 </button>
-              </article>
+                <form v-else class="clause-insert-form" @submit.prevent.stop="addManualClause">
+                  <header><strong>新增条款</strong><span>插入为第 {{ draftClauses.length + 1 }} 条</span></header>
+                  <fieldset class="clause-path-editor">
+                    <legend>完整层级路径 <b>必填</b></legend>
+                    <div v-for="(_, pathIndex) in newClauseForm.path" :key="pathIndex" class="clause-path-editor__item">
+                      <span>{{ pathIndex + 1 }}</span>
+                      <input v-model="newClauseForm.path[pathIndex]" type="text" :placeholder="pathIndex === newClauseForm.path.length - 1 ? '当前条款，例如：10.1 首付款' : '上级路径，例如：第三章 付款与结算'" />
+                      <button type="button" title="使用特殊符号作为编号" @click.stop="useClauseSymbolPath(pathIndex)">◆</button>
+                      <button type="button" :disabled="newClauseForm.path.length === 1" @click.stop="removeClausePathItem(pathIndex)">移除</button>
+                    </div>
+                    <button type="button" class="clause-path-editor__add" @click.stop="addClausePathItem">＋ 新增一级路径</button>
+                  </fieldset>
+                  <div class="clause-insert-form__row clause-insert-form__row--pages">
+                    <label><span>起始页<b>必填</b></span><input v-model.number="newClauseForm.startPage" type="number" min="1" step="1" /></label>
+                    <label><span>结束页<b>必填</b></span><input v-model.number="newClauseForm.endPage" type="number" min="1" step="1" /></label>
+                  </div>
+                  <label><span>条款正文<b>必填</b></span><textarea v-model="newClauseForm.content" placeholder="请输入完整条款正文"></textarea></label>
+                  <p v-if="clauseInsertError" class="clause-insert-form__error">{{ clauseInsertError }}</p>
+                  <footer>
+                    <button type="button" @click.stop="cancelClauseInsert">取消</button>
+                    <button type="submit">确认新增</button>
+                  </footer>
+                </form>
+              </div>
             </section>
 
             <div v-if="!coreReviewFields.length && !draftClauses.length" class="ingestion-detail__notice">
               当前草稿已创建，但暂时没有可展示的提取分区。
             </div>
-            <button type="button" class="ingestion-detail__primary" disabled>
-              入库接口待开放
+            <div v-if="ingestionReceipt" class="ingestion-detail__status is-success extraction-ingestion-success">
+              <i></i>
+              <span>合同已正式入库：{{ ingestionReceipt.file_name }}</span>
+            </div>
+            <button
+              type="button"
+              class="ingestion-detail__primary"
+              :disabled="!canIngestResult"
+              @click="submitIngestion"
+            >
+              {{ ingestionPending ? '正在正式入库' : ingestionReceipt ? '已正式入库' : resultComplete ? '正式入库' : '等待全部阶段完成' }}
             </button>
           </div>
         </template>
       </aside>
+        <Transition name="ingestion-error-toast">
+          <div
+            v-if="detailMode === 'result' && ingestionErrors.length"
+            class="ingestion-detail__error ingestion-error-toast"
+            role="alert"
+          >
+            <strong>暂时无法入库</strong>
+            <ol>
+              <li v-for="(error, index) in ingestionErrors" :key="`${index}-${error}`">
+                {{ error }}
+              </li>
+            </ol>
+          </div>
+        </Transition>
+        <button
+          v-if="detailMode === 'result'"
+          type="button"
+          class="ingestion-detail-floating-close"
+          aria-label="关闭结果"
+          @click="closeDetail"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+        </button>
+      </div>
     </Transition>
 
     <PdfPreviewOverlay
-      :open="Boolean(candidatePreviewUrl)"
+      :open="active && Boolean(candidatePreviewUrl)"
       :src="candidatePreviewUrl"
       :label="candidatePreviewLabel"
       @close="closeCandidatePreview"
@@ -4551,7 +5358,7 @@ onBeforeUnmount(() => {
   position: relative;
   flex: 0 0 auto;
   width: 100%;
-  min-width: 2280px;
+  min-width: 2580px;
   height: 620px;
   min-height: 100%;
   overflow: hidden;
@@ -5100,13 +5907,14 @@ onBeforeUnmount(() => {
     inset 0 0 0 1px var(--stage-color-soft);
 }
 
-.workflow-stage-node--detection { top: 237px; left: 15.31%; width: 11%; }
-.workflow-stage-node--duplication { top: 237px; left: 29.19%; width: 11%; }
-.workflow-stage-node--preprocessing { top: 237px; left: 43.06%; width: 11%; }
-.workflow-stage-node--classification { top: 237px; left: 56.94%; width: 11%; }
-.workflow-stage-node--field { top: 60px; left: 70.81%; width: 12.92%; }
-.workflow-stage-node--clause { top: 237px; left: 70.81%; width: 12.92%; }
-.workflow-stage-node--retrieval { top: 414px; left: 70.81%; width: 12.92%; }
+.workflow-stage-node--detection { top: 237px; left: 13.45%; width: 9.66%; }
+.workflow-stage-node--duplication { top: 237px; left: 25.63%; width: 9.66%; }
+.workflow-stage-node--preprocessing { top: 237px; left: 37.82%; width: 9.66%; }
+.workflow-stage-node--classification { top: 237px; left: 50%; width: 9.66%; }
+.workflow-stage-node--naming { top: 237px; left: 62.18%; width: 9.66%; }
+.workflow-stage-node--field { top: 60px; left: 74.37%; width: 11.34%; }
+.workflow-stage-node--clause { top: 237px; left: 74.37%; width: 11.34%; }
+.workflow-stage-node--retrieval { top: 414px; left: 74.37%; width: 11.34%; }
 
 .workflow-stage-node::before {
   position: absolute;
@@ -5955,8 +6763,8 @@ onBeforeUnmount(() => {
 
 .workflow-result-node {
   top: 191px;
-  left: 87.08%;
-  width: 11%;
+  left: 88.66%;
+  width: 9.66%;
   min-height: 260px;
   padding: 22px;
   overflow: hidden;
@@ -6102,13 +6910,21 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
-.ingestion-detail {
+.ingestion-detail-shell {
   position: absolute;
   z-index: 20;
   top: 18px;
   right: 18px;
   bottom: 18px;
   width: min(370px, calc(100% - 36px));
+  overflow: visible;
+  transform-origin: right center;
+}
+
+.ingestion-detail {
+  position: relative;
+  width: 100%;
+  height: 100%;
   padding: 29px 26px 24px;
   overflow: auto;
   background: #f9fbfaf2;
@@ -6118,18 +6934,84 @@ onBeforeUnmount(() => {
     0 34px 80px #26392f35,
     inset 0 1px #fff;
   backdrop-filter: blur(24px) saturate(1.25);
-  transform-origin: right center;
+}
+
+.ingestion-detail-shell.is-deduplication,
+.ingestion-detail-shell.is-classification {
+  width: min(540px, calc(100% - 36px));
 }
 
 .ingestion-detail.is-deduplication,
 .ingestion-detail.is-classification {
-  width: min(540px, calc(100% - 36px));
+  width: 100%;
   padding: 34px 32px 28px;
 }
 
-.ingestion-detail.is-result {
+.ingestion-detail-shell.is-result {
   width: min(660px, calc(100% - 36px));
+}
+
+.ingestion-detail.is-result {
+  width: 100%;
   padding: 34px 32px 28px;
+}
+
+.ingestion-detail__error.ingestion-error-toast {
+  position: absolute;
+  z-index: 5;
+  right: 24px;
+  bottom: 24px;
+  left: 24px;
+  margin: 0;
+  pointer-events: auto;
+  color: #762f2a;
+  background: linear-gradient(145deg, #fff7f5f7, #fceae7f2);
+  border: 1px solid #c85f566b;
+  box-shadow: 0 18px 42px #7d30283d, 0 4px 12px #40252024, inset 0 1px #fff;
+  backdrop-filter: blur(18px) saturate(1.15);
+}
+
+.ingestion-detail__error.ingestion-error-toast > strong {
+  color: #8f352f;
+  font-size: 14px;
+  font-weight: 780;
+}
+
+.ingestion-error-toast ol {
+  display: grid;
+  gap: 5px;
+  max-height: min(240px, 42vh);
+  padding: 0 0 0 18px;
+  margin: 7px 0 0;
+  overflow: hidden auto;
+}
+
+.ingestion-error-toast li {
+  padding-left: 2px;
+  color: #7d3732;
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1.65;
+}
+
+.ingestion-error-toast li::marker {
+  color: #bd4e46;
+  font-weight: 800;
+}
+
+.ingestion-error-toast-enter-active,
+.ingestion-error-toast-leave-active {
+  transition:
+    opacity 0.24s ease,
+    filter 0.3s ease,
+    transform 0.34s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ingestion-error-toast-enter-from,
+.ingestion-error-toast-leave-to {
+  opacity: 0;
+  filter: blur(5px);
+  transform: translateY(12px) scale(0.985);
 }
 
 .ingestion-detail:is(.is-deduplication, .is-classification, .is-result) h3 {
@@ -6159,12 +7041,11 @@ onBeforeUnmount(() => {
   position: sticky;
   z-index: 2;
   top: -13px;
-  float: right;
   display: grid;
   place-items: center;
   width: 31px;
   height: 31px;
-  margin: -8px -6px 0 10px;
+  margin: -8px -6px -23px auto;
   color: #76817b;
   cursor: pointer;
   background: #edf1ef;
@@ -6474,9 +7355,10 @@ onBeforeUnmount(() => {
 }
 
 .ingestion-detail__facts div {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 210px);
+  gap: 16px;
   align-items: center;
-  justify-content: space-between;
   padding: 11px 2px;
   border-bottom: 1px solid #52615910;
 }
@@ -6491,7 +7373,8 @@ onBeforeUnmount(() => {
 .ingestion-detail__facts dd { color: #3d4943; font-weight: 650; }
 
 .ingestion-detail__facts dd {
-  max-width: 210px;
+  min-width: 0;
+  width: 100%;
   text-align: right;
 }
 
@@ -6918,103 +7801,6 @@ onBeforeUnmount(() => {
   transform: none;
 }
 
-.ingestion-detail__file-name {
-  display: grid;
-  gap: 7px;
-  margin-top: 20px;
-}
-
-.ingestion-detail__file-name.is-heading {
-  box-sizing: border-box;
-  min-height: 78px;
-  padding-right: 42px;
-  margin-top: 0;
-}
-
-.ingestion-detail__file-name > span {
-  color: #69746e;
-  font-size: 9px;
-  font-weight: 700;
-}
-
-.ingestion-detail__file-name-field {
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  width: 100%;
-  color: #2f3c35;
-  background: #ffffffb8;
-  border: 1px solid #52615816;
-  border-radius: 9px;
-  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.ingestion-detail__file-name-field input {
-  box-sizing: border-box;
-  min-width: 0;
-  flex: 1;
-  height: 44px;
-  padding: 0 13px;
-  color: inherit;
-  font-size: 15px;
-  font-weight: 680;
-  letter-spacing: -0.02em;
-  background: transparent;
-  border: 0;
-  outline: none;
-}
-
-.ingestion-detail__file-name-field > span {
-  display: grid;
-  align-self: stretch;
-  place-items: center;
-  padding: 0 12px 1px;
-  color: #7165c7;
-  font-size: 12px;
-  font-weight: 760;
-  letter-spacing: -0.01em;
-  background: #7568df0a;
-  border-left: 1px solid #7568df12;
-  border-radius: 0 8px 8px 0;
-  user-select: none;
-}
-
-.ingestion-detail__file-name-field:focus-within {
-  background: #fff;
-  border-color: #7568df66;
-  box-shadow: 0 0 0 3px #7568df10;
-}
-
-.ingestion-detail__file-name-field.is-invalid {
-  border-color: #cf6d655c;
-  box-shadow: 0 0 0 3px #cf6d650d;
-}
-
-.ingestion-detail__file-name-field.is-locked {
-  color: #59645e;
-  cursor: default;
-  background: #f0f3f1c7;
-  border-color: #52615810;
-  box-shadow: inset 0 1px 2px #33443b08;
-}
-
-.ingestion-detail__file-name-field.is-locked > span {
-  color: #808983;
-  background: #68756e08;
-  border-left-color: #5261580d;
-}
-
-.ingestion-detail__file-name-field.is-locked:focus-within {
-  border-color: #52615810;
-  box-shadow: inset 0 1px 2px #33443b08;
-}
-
-.ingestion-detail__file-name small {
-  min-height: 12px;
-  color: #949c98;
-  font-size: 8px;
-}
-
 .ingestion-detail__primary.is-complete {
   background: linear-gradient(135deg, #4f9d73, #397656);
   box-shadow: 0 11px 24px #377b5728;
@@ -7066,6 +7852,57 @@ onBeforeUnmount(() => {
 .extraction-result-section > header span {
   color: #8176cc;
   font-size: 10px;
+}
+
+.extraction-result-file-name {
+  display: grid;
+  gap: 7px;
+}
+
+.extraction-result-file-name > span {
+  color: #56625b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.extraction-result-file-name b {
+  margin-left: 5px;
+  color: #b7645d;
+  font-size: 8px;
+}
+
+.extraction-result-file-name input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 44px;
+  padding: 0 13px;
+  color: #354139;
+  font: inherit;
+  font-weight: 650;
+  background: #fffdf9;
+  border: 1px solid #8c795329;
+  border-radius: 9px;
+  outline: none;
+  box-shadow: inset 0 2px 5px #6d5c3710;
+}
+
+.extraction-result-file-name input:focus {
+  border-color: #9b7d4970;
+  box-shadow: inset 0 2px 5px #6d5c3710, 0 0 0 3px #b6904d12;
+}
+
+.extraction-result-file-name input:disabled {
+  color: #737b76;
+  background: #f2f1ed;
+}
+
+.extraction-result-file-name small {
+  color: #8d948f;
+  font-size: 9px;
+}
+
+.extraction-ingestion-success {
+  margin-top: 2px;
 }
 
 .extraction-result-item {
@@ -7208,6 +8045,248 @@ onBeforeUnmount(() => {
   color: #fff;
   background: #7165c8;
   border-color: #7165c8;
+}
+
+.clause-review-list {
+  display: grid;
+  gap: 0;
+}
+
+.clause-review-item-shell {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-width: 0;
+  margin-bottom: 14px;
+}
+
+.clause-review-item-shell:last-child {
+  margin-bottom: 0;
+}
+
+.clause-review-item-shell.is-removing {
+  pointer-events: none;
+}
+
+.clause-review-item-shell__content {
+  display: grid;
+  min-height: 0;
+  gap: 14px;
+}
+
+.clause-insert-slot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 18px;
+}
+
+.clause-insert-slot__trigger {
+  display: inline-flex;
+  gap: 0;
+  align-items: center;
+  padding: 3px 9px;
+  color: #796a39;
+  cursor: pointer;
+  background: rgb(255 247 216 / 72%);
+  border: 1px dashed rgb(113 85 29 / 24%);
+  border-radius: 999px;
+  opacity: 0.58;
+  transition: gap 0.24s ease, opacity 0.2s ease, transform 0.2s ease, background 0.2s ease;
+}
+
+.clause-insert-slot__trigger span {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.clause-insert-slot__trigger i {
+  max-width: 0;
+  overflow: hidden;
+  font-size: 9px;
+  font-style: normal;
+  white-space: nowrap;
+  opacity: 0;
+  transition: max-width 0.24s ease, opacity 0.2s ease;
+}
+
+.clause-insert-slot__trigger:hover,
+.clause-insert-slot__trigger:focus-visible {
+  gap: 6px;
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.clause-insert-slot__trigger:hover i,
+.clause-insert-slot__trigger:focus-visible i {
+  max-width: 100px;
+  opacity: 1;
+}
+
+.clause-insert-form {
+  display: grid;
+  width: 100%;
+  gap: 12px;
+  padding: 16px;
+  background: rgb(255 246 207 / 58%);
+  border: 1px solid rgb(100 66 10 / 15%);
+  border-radius: 12px;
+  box-shadow: inset 2px 2px 6px rgb(91 55 7 / 10%);
+}
+
+.clause-insert-form > header,
+.clause-insert-form footer,
+.clause-insert-form__row {
+  display: flex;
+  gap: 12px;
+}
+
+.clause-insert-form > header,
+.clause-insert-form footer {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.clause-insert-form > header strong {
+  color: #49330f;
+  font-size: 13px;
+}
+
+.clause-insert-form > header span {
+  color: #806d42;
+  font-size: 9px;
+}
+
+.clause-insert-form label {
+  display: grid;
+  flex: 1 1 0;
+  gap: 6px;
+  color: #5d471e;
+  font-size: 10px;
+}
+
+.clause-insert-form label span {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.clause-insert-form label b {
+  color: #a15d58;
+  font-size: 8px;
+}
+
+.clause-insert-form input,
+.clause-insert-form select,
+.clause-insert-form textarea {
+  width: 100%;
+  padding: 9px 10px;
+  color: #493916;
+  font: inherit;
+  background: rgb(255 252 237 / 72%);
+  border: 1px solid rgb(92 57 8 / 16%);
+  border-radius: 8px;
+  outline: none;
+}
+
+.clause-insert-form textarea {
+  min-height: 110px;
+  resize: vertical;
+}
+
+.clause-insert-form input:focus,
+.clause-insert-form select:focus,
+.clause-insert-form textarea:focus {
+  border-color: rgb(155 104 22 / 50%);
+  box-shadow: 0 0 0 3px rgb(208 168 62 / 12%);
+}
+
+.clause-insert-form__row--pages label {
+  flex: 0 1 150px;
+}
+
+.clause-path-editor {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.clause-path-editor legend {
+  margin-bottom: 7px;
+  color: #5d471e;
+  font-size: 10px;
+}
+
+.clause-path-editor legend b {
+  margin-left: 5px;
+  color: #a15d58;
+  font-size: 8px;
+}
+
+.clause-path-editor__item {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto auto;
+  gap: 7px;
+  align-items: center;
+}
+
+.clause-path-editor__item > span {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  color: #76551b;
+  font-size: 9px;
+  background: rgb(255 244 199 / 55%);
+  border: 1px solid rgb(91 55 7 / 15%);
+  border-radius: 50%;
+}
+
+.clause-path-editor__item button,
+.clause-path-editor__add {
+  padding: 7px 9px;
+  color: #674a18;
+  font-size: 9px;
+  cursor: pointer;
+  background: rgb(255 247 218 / 55%);
+  border: 1px solid rgb(91 55 7 / 16%);
+  border-radius: 7px;
+}
+
+.clause-path-editor__item button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.clause-path-editor__add {
+  justify-self: start;
+}
+
+.clause-insert-form__error {
+  margin: 0;
+  color: #a8504d;
+  font-size: 10px;
+}
+
+.clause-insert-form footer {
+  justify-content: flex-end;
+}
+
+.clause-insert-form footer button {
+  padding: 7px 13px;
+  color: #594016;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  background: rgb(255 247 218 / 55%);
+  border: 1px solid rgb(91 55 7 / 18%);
+  border-radius: 8px;
+}
+
+.clause-insert-form footer button[type='submit'] {
+  background: linear-gradient(135deg, #e4c253, #c9942e);
 }
 
 .extraction-result-item__markdown {
@@ -7675,23 +8754,59 @@ onBeforeUnmount(() => {
   scrollbar-color: rgb(91 57 12 / 34%) transparent;
 }
 
-.ingestion-detail.is-result .ingestion-detail__close {
+.ingestion-detail-floating-close {
+  position: absolute;
+  z-index: 3;
+  top: -10px;
+  right: -10px;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
   color: #674916;
+  cursor: pointer;
   background: linear-gradient(145deg, #e7ca6c, #bd8d32);
   border: 1px solid rgb(255 232 151 / 34%);
+  border-radius: 50%;
   box-shadow:
     4px 4px 9px rgb(91 56 9 / 30%),
     -3px -3px 8px rgb(255 232 142 / 28%),
     inset 1px 1px 2px rgb(255 239 178 / 44%);
+  backdrop-filter: blur(14px) saturate(0.82);
+  transition:
+    color 0.18s,
+    background 0.18s,
+    border-color 0.18s,
+    transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.ingestion-detail.is-result .ingestion-detail__close:hover {
+.ingestion-detail-floating-close:hover {
   color: #3f2b0d;
   background: linear-gradient(145deg, #efd77e, #c79738);
   box-shadow:
     3px 3px 7px rgb(91 56 9 / 34%),
     -2px -2px 6px rgb(255 235 153 / 34%),
     inset 2px 2px 4px rgb(112 70 10 / 12%);
+  transform: scale(1.06);
+}
+
+.ingestion-detail-floating-close:active {
+  transform: scale(0.96);
+}
+
+.ingestion-detail-floating-close:focus-visible {
+  outline: 2px solid #aaa0ed;
+  outline-offset: 3px;
+}
+
+.ingestion-detail-floating-close svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.7;
 }
 
 .ingestion-detail.is-result .ingestion-detail__eyebrow {
@@ -7976,6 +9091,18 @@ onBeforeUnmount(() => {
   color: #3e2a0c;
   background: #dfbc53;
   border-color: rgb(255 233 151 / 34%);
+}
+
+.ingestion-detail.is-result .extraction-result-item__clause-actions button.is-danger {
+  color: #7d3831;
+  background: rgb(172 61 48 / 8%);
+  border-color: rgb(132 48 38 / 18%);
+}
+
+.ingestion-detail.is-result .extraction-result-item__clause-actions button.is-danger:hover {
+  color: #fff4e8;
+  background: #a64c40;
+  border-color: #a64c40;
 }
 
 .ingestion-detail.is-result .extraction-result-item__markdown {
@@ -8438,6 +9565,7 @@ onBeforeUnmount(() => {
   .core-review-item-enter-active,
   .core-review-item-leave-active,
   .core-review-item-move,
+  .clause-review-list,
   .core-review-empty-enter-active,
   .core-review-empty-leave-active {
     transition: none;

@@ -1,10 +1,18 @@
 <script setup>
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import {
+  computed,
+  nextTick,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  onMounted,
+  ref,
+  watch,
+} from 'vue'
 import HandwritingPrompt from './HandwritingPrompt.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
-
-const ContractCabinetScene = defineAsyncComponent(() => import('./ContractCabinetScene.vue'))
-const emit = defineEmits(['visual-pause-change'])
+defineOptions({ name: 'ContractLibraryView' })
+const props = defineProps({ active: { type: Boolean, default: true } })
 
 let conversationId = 4
 
@@ -178,6 +186,7 @@ let messageId = 7
 let composerResizeFrame = 0
 let initialMessageTimer = 0
 let copyFeedbackTimer = 0
+let libraryViewActive = false
 let resizeContainerLeft = 0
 let resizePointerOffset = 0
 
@@ -612,14 +621,33 @@ function handleHistoryFocusOut(event) {
   }
 }
 
-onMounted(async () => {
+async function activateLibraryView() {
+  if (libraryViewActive) return
+  libraryViewActive = true
   await nextTick()
   updateResizeMetrics()
   window.addEventListener('resize', updateResizeMetrics)
+}
+
+function deactivateLibraryView() {
+  if (!libraryViewActive) return
+  libraryViewActive = false
+  window.removeEventListener('resize', updateResizeMetrics)
+}
+
+onMounted(() => {
+  if (props.active) activateLibraryView()
+})
+
+onActivated(activateLibraryView)
+onDeactivated(deactivateLibraryView)
+watch(() => props.active, (active) => {
+  if (active) activateLibraryView()
+  else deactivateLibraryView()
 })
 
 onBeforeUnmount(() => {
-  emit('visual-pause-change', false)
+  deactivateLibraryView()
   window.clearTimeout(initialMessageTimer)
   window.clearTimeout(copyFeedbackTimer)
   window.cancelAnimationFrame(composerResizeFrame)
@@ -627,7 +655,6 @@ onBeforeUnmount(() => {
   replyTimers.clear()
   messageEntryTimers.forEach((timer) => window.clearTimeout(timer))
   messageEntryTimers.clear()
-  window.removeEventListener('resize', updateResizeMetrics)
 })
 </script>
 
@@ -972,11 +999,7 @@ onBeforeUnmount(() => {
       </button>
     </section>
 
-    <section class="contract-cabinet-stage" aria-label="合同文件柜区域">
-      <ContractCabinetScene
-        @preview-visibility-change="emit('visual-pause-change', $event)"
-      />
-    </section>
+    <section class="contract-library-reserved" aria-label="合同库预留区域"></section>
   </section>
 </template>
 
@@ -996,7 +1019,7 @@ onBeforeUnmount(() => {
 }
 
 .contract-agent,
-.contract-cabinet-stage {
+.contract-library-reserved {
   min-width: 0;
   min-height: 0;
 }
@@ -1920,7 +1943,7 @@ onBeforeUnmount(() => {
   transform: scale(0.72);
 }
 
-.contract-cabinet-stage {
+.contract-library-reserved {
   position: relative;
   isolation: isolate;
   display: grid;
@@ -1932,7 +1955,7 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
-.contract-cabinet-stage::after {
+.contract-library-reserved::after {
   display: none;
 }
 
@@ -2028,7 +2051,7 @@ onBeforeUnmount(() => {
   }
 
   .contract-agent,
-  .contract-cabinet-stage {
+  .contract-library-reserved {
     border-radius: 0;
   }
 

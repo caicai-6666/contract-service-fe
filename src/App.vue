@@ -1,5 +1,6 @@
 <script setup>
-import { onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import ContractIngestionView from './components/ContractIngestionView.vue'
 import ContractLibraryView from './components/ContractLibraryView.vue'
 import LoginCard from './components/LoginCard.vue'
@@ -17,10 +18,15 @@ const loginState = ref(initialAuthSession ? 'success' : 'idle')
 const loginError = ref('')
 const loginNotice = ref('')
 const authSession = ref(initialAuthSession)
-const activeSection = ref(0)
 const visualEffectsPaused = ref(false)
+const route = useRoute()
+const router = useRouter()
 
-const workspaceSections = ['合同库', '处理流']
+const workspaceSections = [
+  { label: '合同库', to: '/library' },
+  { label: '处理流', to: '/ingestion' },
+]
+const activeSection = computed(() => Number(route.meta.sectionIndex) || 0)
 
 let loginRequestController = null
 
@@ -63,7 +69,7 @@ function logout({ expired = false } = {}) {
   loginState.value = 'idle'
   loginError.value = ''
   loginNotice.value = expired ? '登录状态已失效，请重新登录' : ''
-  activeSection.value = 0
+  router.replace('/library')
   visualEffectsPaused.value = false
 }
 
@@ -74,6 +80,15 @@ function handleAuthExpired() {
 function setVisualEffectsPaused(paused) {
   visualEffectsPaused.value = Boolean(paused)
 }
+
+function navigateToSection(section) {
+  if (route.path === section.to) return
+  router.push(section.to)
+}
+
+watch(() => route.fullPath, () => {
+  visualEffectsPaused.value = false
+})
 
 window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
 
@@ -120,14 +135,14 @@ onBeforeUnmount(() => {
             <span class="prototype-workspace__nav-slider" aria-hidden="true"></span>
             <button
               v-for="(section, index) in workspaceSections"
-              :key="section"
+              :key="section.to"
               type="button"
               class="prototype-workspace__nav-item"
               :class="{ 'prototype-workspace__nav-item--active': activeSection === index }"
               :aria-current="activeSection === index ? 'page' : undefined"
-              @click="activeSection = index"
+              @click="navigateToSection(section)"
             >
-              {{ section }}
+              {{ section.label }}
             </button>
           </nav>
 
@@ -156,14 +171,30 @@ onBeforeUnmount(() => {
             'prototype-workspace__content--contract-ingestion': activeSection === 1,
           }"
         >
-          <ContractLibraryView
-            v-if="activeSection === 0"
-            @visual-pause-change="setVisualEffectsPaused"
-          />
-          <ContractIngestionView
-            v-else
-            @visual-pause-change="setVisualEffectsPaused"
-          />
+          <div
+            class="workspace-route-track"
+            :class="{ 'is-ingestion': activeSection === 1 }"
+          >
+            <section
+              class="workspace-route-panel workspace-route-panel--library"
+              :aria-hidden="activeSection !== 0"
+              :inert="activeSection !== 0"
+            >
+              <ContractLibraryView
+                :active="activeSection === 0"
+              />
+            </section>
+            <section
+              class="workspace-route-panel workspace-route-panel--ingestion"
+              :aria-hidden="activeSection !== 1"
+              :inert="activeSection !== 1"
+            >
+              <ContractIngestionView
+                :active="activeSection === 1"
+                @visual-pause-change="setVisualEffectsPaused"
+              />
+            </section>
+          </div>
         </div>
       </section>
     </Transition>

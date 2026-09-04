@@ -1,8 +1,12 @@
-import { ContractApiError, contractApiFetch } from './contractApi.js'
+import {
+  CONTRACT_API_BASE_PATH,
+  ContractApiError,
+  contractApiFetch,
+} from './contractApi.js'
 
-const EXTRACTION_RUNS_PATH = '/contract/api/contract/extraction-runs'
-const CORE_DEFINITIONS_PATH = '/contract/api/contract/core-definitions'
-const CONTRACT_RESOURCE_PATH = '/contract/api/resource/contract'
+const EXTRACTION_RUNS_PATH = `${CONTRACT_API_BASE_PATH}/contract/extraction-runs`
+const CORE_DEFINITIONS_PATH = `${CONTRACT_API_BASE_PATH}/contract/core-definitions`
+const CONTRACT_RESOURCE_PATH = `${CONTRACT_API_BASE_PATH}/resource/contract`
 
 async function responsePayload(response) {
   return response.json().catch(() => null)
@@ -155,6 +159,16 @@ export async function retryExtractionStage(runId, stageCode, { signal } = {}) {
     { method: 'POST', signal },
   )
   return requireJsonResponse(response, [202])
+}
+
+export async function ingestExtractionRun(runId, draft, { signal } = {}) {
+  const response = await contractApiFetch(runPath(runId, '/ingestion'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(draft),
+    signal,
+  })
+  return requireJsonResponse(response, [201])
 }
 
 export async function getDeduplicationCandidatePdf(fileUri, { signal } = {}) {

@@ -4,7 +4,7 @@
 
 ## 登录流程
 
-登录页只收集审核用户密钥，通过 `POST /contract/api/auth/login` 发送 JSON 请求。请求体仅包含非空的 `secret_key`，前端不提交用户名称，也不在浏览器中保存原始密钥。
+登录页只收集审核用户密钥，通过合同 API 基础路径下的 `POST /auth/login` 发送 JSON 请求。请求体仅包含非空的 `secret_key`，前端不提交用户名称，也不在浏览器中保存原始密钥。
 
 登录成功后，前端读取响应中的 `login_code` 和 `user_name`。工作台使用 `user_name` 展示当前审核身份；`login_code` 作为后续受保护请求的 Bearer 凭据。
 
@@ -26,7 +26,7 @@ Authorization: Bearer <login_code>
 
 若受保护接口返回 `401`，统一请求入口会清除本地会话并通知根页面返回登录界面。健康检查和登录接口不通过该入口调用。
 
-开发服务器将 `/contract/api` 原样代理到 `http://127.0.0.1:10000`，与当前 Nginx 的合同 API 上游保持一致；代理不移除 `/contract/api` 前缀。
+生产构建使用 `/contract/api` 作为合同 API 基础路径。Vite 开发模式自动在该路径前增加 `/dev`，浏览器因此请求 `/dev/contract/api`；该请求先由 Nginx 去除 `/dev` 并映射到开发服务器，后续仍按 `/contract/api` 处理。开发模式需要通过该 Nginx 入口访问页面，直接访问 Vite 端口时不具备去除 `/dev` 的映射能力。
 
 ## 验证范围
 
