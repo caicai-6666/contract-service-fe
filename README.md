@@ -42,6 +42,8 @@ npm run build
 
 ## 项目文档
 
+容器部署使用根目录 `Dockerfile`，构建及运行命令见 [Docker 部署](description/platform/docker.md)。
+
 - 开发规范见 [`AGENTS.md`](AGENTS.md)。
 - 项目原则与前端边界见 [`description/project.md`](description/project.md)。
 - 文档导航见 [`description/readme.md`](description/readme.md)。

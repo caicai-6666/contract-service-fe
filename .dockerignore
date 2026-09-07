@@ -1,0 +1,14 @@
+**/node_modules
+dist
+.git
+.DS_Store
+**/.DS_Store
+.env*
+*.log
+.npmrc
+coverage
+work
+description
+tests
+public/pdfjs
+public/.pdfjs-sync-*

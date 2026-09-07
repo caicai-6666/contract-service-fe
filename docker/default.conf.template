@@ -1,0 +1,68 @@
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+    server_tokens off;
+    absolute_redirect off;
+    client_max_body_size ${CLIENT_MAX_BODY_SIZE};
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location = / {
+        return 302 /contract/;
+    }
+
+    location = /contract {
+        return 308 /contract/;
+    }
+
+    # 不重写 API 路径、不缓存鉴权响应、不缓冲 SSE。
+    location ^~ /contract/api/ {
+        proxy_pass http://${BACKEND_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location = /contract/api {
+        return 404;
+    }
+
+    # 资源缺失必须返回 404，不能回退为 HTML。
+    location ^~ /contract/assets/ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    location ^~ /contract/pdfjs/ {
+        try_files $uri =404;
+        add_header Cache-Control "no-cache";
+    }
+
+    location ~ ^/contract/.*\.[^/]+$ {
+        try_files $uri =404;
+        add_header Cache-Control "no-cache";
+    }
+
+    location /contract/ {
+        try_files $uri $uri/ /contract/index.html;
+        add_header Cache-Control "no-cache";
+    }
+
+    location / {
+        return 404;
+    }
+}
