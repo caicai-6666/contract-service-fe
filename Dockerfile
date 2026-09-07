@@ -17,7 +17,7 @@ ENV BACKEND_UPSTREAM=contract-service:20000 \
     CLIENT_MAX_BODY_SIZE=100m \
     NGINX_ENVSUBST_FILTER="^(BACKEND_UPSTREAM|CLIENT_MAX_BODY_SIZE)$"
 
-COPY docker/default.conf.template /etc/nginx/templates/default.conf.template
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /workspace/dist /usr/share/nginx/html/contract
 
 EXPOSE 80

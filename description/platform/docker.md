@@ -35,6 +35,8 @@ docker run -d --name contract-service-fe \
 | `BACKEND_UPSTREAM` | `contract-service:20000` | HTTP 后端的 `主机:端口`，不含协议、路径或尾斜杠 |
 | `CLIENT_MAX_BODY_SIZE` | `100m` | Nginx 请求体上限，可按部署需要调整；不是后端业务限制 |
 
+仓库根目录的 [`nginx.conf`](../../nginx.conf) 是服务配置模板，Dockerfile 将其复制到 `/etc/nginx/templates/default.conf.template`，容器启动时替换环境变量并生成 `/etc/nginx/conf.d/default.conf`。它是 `server` 配置片段，不是用于替换 `/etc/nginx/nginx.conf` 的全局配置。
+
 变量由 Nginx 官方镜像启动脚本写入配置，修改后需重建容器，不必重新构建镜像。只允许可信部署人员设置这些变量，不放入登录密钥。HTTPS 在外层网关终止；本镜像监听 HTTP 80。
 
 ## 转发与缓存边界
@@ -42,7 +44,9 @@ docker run -d --name contract-service-fe \
 - API 保留原始路径、查询参数和 Authorization 请求头，不做 SPA 回退或共享缓存。
 - 关闭代理响应缓冲以支持 SSE；读取超时为两次上游读取之间最长 3600 秒，而非任务总时长。外层网关也必须支持流式转发。
 - 页面路由回退到 `index.html`；缺失的构建资源和 PDF.js 文件返回 404。
-- 带内容哈希的 `assets/` 长期缓存；HTML 和未带版本路径的 PDF.js 资源要求重新验证，避免发布后读取旧资源。
+- `assets/` 中带内容哈希的图片及其他构建资源缓存一年并标记 `immutable`，内容更新后由新文件名刷新缓存。小图片可能由 Vite 内联到 JS，随对应带哈希的 JS 文件缓存。
+- `public/` 中固定文件名的图片（包括 SVG 图标）缓存 7 天，覆盖 AVIF、WebP、PNG、JPEG、GIF、SVG、ICO、BMP、TIFF 和 APNG。过期后可通过 ETag / Last-Modified 协商缓存；同名替换在有效期内可能仍显示旧图，需要立即更新时应更换文件名或引用 URL 的版本参数。缺失图片返回 404，不附加长期缓存头。
+- HTML 和未带版本路径的 PDF.js 资源仍要求重新验证；API 和受保护的合同 PDF 不受图片缓存规则影响。以上配置仅针对 Docker 内的生产 Nginx，不修改开发服务器缓存；外层网关不应覆盖这些响应头。
 - `/healthz` 仅验证 Nginx 存活，不表示后端可用。正式合同 PDF 通过鉴权 API 获取，不写入前端镜像。
 
 配置机制参见 [Nginx 官方镜像模板脚本](https://github.com/nginx/docker-nginx/blob/master/entrypoint/20-envsubst-on-templates.sh)，SSE 缓冲行为参见 [Nginx 代理模块文档](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering)。基础镜像使用版本系列标签，严格复现发布时应锁定已验证的镜像摘要。
