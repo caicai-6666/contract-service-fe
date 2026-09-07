@@ -6,6 +6,7 @@ import ContractLibraryView from './components/ContractLibraryView.vue'
 import LoginCard from './components/LoginCard.vue'
 import MolecularFieldBackground from './components/MolecularFieldBackground.vue'
 import logoUrl from './assets/logo.webp'
+import { getContractPermissions } from './models/contractPermissions.js'
 import {
   AUTH_EXPIRED_EVENT,
   clearAuthSession,
@@ -18,6 +19,7 @@ const loginState = ref(initialAuthSession ? 'success' : 'idle')
 const loginError = ref('')
 const loginNotice = ref('')
 const authSession = ref(initialAuthSession)
+const permissions = computed(() => getContractPermissions(authSession.value?.permissionLevel))
 const visualEffectsPaused = ref(false)
 const route = useRoute()
 const router = useRouter()
@@ -82,6 +84,7 @@ function setVisualEffectsPaused(paused) {
 }
 
 function navigateToSection(section) {
+  if (section.to === '/ingestion' && !permissions.value.canCreate) return
   if (route.path === section.to) return
   router.push(section.to)
 }
@@ -89,6 +92,10 @@ function navigateToSection(section) {
 watch(() => route.fullPath, () => {
   visualEffectsPaused.value = false
 })
+
+watch([authSession, () => route.path], () => {
+  if (authSession.value && !permissions.value.canCreate && route.path === '/ingestion') router.replace('/library')
+}, { immediate: true })
 
 window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
 
@@ -128,6 +135,7 @@ onBeforeUnmount(() => {
           </div>
 
           <nav
+            v-if="permissions.canCreate"
             class="prototype-workspace__nav"
             :style="{ '--workspace-nav-offset': `calc(${activeSection * 100}% + ${activeSection * 4}px)` }"
             aria-label="主要模块"
@@ -185,6 +193,7 @@ onBeforeUnmount(() => {
               />
             </section>
             <section
+              v-if="permissions.canCreate"
               class="workspace-route-panel workspace-route-panel--ingestion"
               :aria-hidden="activeSection !== 1"
               :inert="activeSection !== 1"

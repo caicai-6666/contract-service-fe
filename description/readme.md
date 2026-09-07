@@ -10,10 +10,11 @@
 | --- | --- |
 | 了解前端项目定位、开发思想与边界 | [项目开发原则](project.md) |
 | 进行代码开发、修改或重构 | [`AGENTS.md`](../AGENTS.md) |
-| 了解审核用户登录和接口鉴权 | [前端登录与鉴权](authentication.md) |
-| 了解智能助手的会话交互 | [智能助手会话交互](agent-conversation.md) |
-| 了解合同处理流展示 | [合同处理流展示](contract-ingestion.md) |
-| 了解页面路由和部署回退要求 | [前端页面路由](routing.md) |
+| 了解审核用户登录、权限等级和接口鉴权 | [前端登录与鉴权](platform/authentication.md) |
+| 了解页面路由、页面状态保留和部署回退要求 | [前端页面路由](platform/routing.md) |
+| 了解正式合同目录、筛选、PDF 预览和删除 | [合同库档案筛选](features/contract-library.md) |
+| 了解合同提取、查重、校对和正式入库 | [合同处理流展示](features/contract-ingestion.md) |
+| 了解智能助手的会话交互 | [智能助手会话交互](features/agent-conversation.md) |
 | 新建、修改或审查文档 | [文档撰写风格手册](documentation.md) |
 
 ---
@@ -22,16 +23,21 @@
 
 ```text
 description/
-  authentication.md     审核用户登录、浏览器会话与接口鉴权
-  agent-conversation.md  智能助手空状态、消息进入和会话命名
-  contract-ingestion.md 合同处理流展示、交互与原型边界
-  routing.md            页面路由、基础路径与部署回退要求
-  project.md             项目级开发思想、边界与质量原则
-  readme.md              文档统一入口与职责说明
-  documentation.md       文档命名、结构、表达与维护规范
+├── project.md                 项目级开发思想、边界与质量原则
+├── readme.md                  文档统一入口与职责说明
+├── documentation.md           文档命名、结构、表达与维护规范
+├── platform/                  跨业务的前端基础能力
+│   ├── authentication.md      登录、浏览器会话、权限与接口鉴权
+│   └── routing.md             页面路由、状态保留与部署回退
+└── features/                  面向用户的业务功能
+    ├── contract-library.md    正式合同目录、筛选、预览与删除
+    ├── contract-ingestion.md  合同提取、查重、审核校对与入库
+    └── agent-conversation.md  智能助手会话、消息与交互原型
 ```
 
-不为尚未形成的模块预建空目录或占位链接。新增文档时，应先明确其稳定用途和目标读者，再决定是否需要建立专题目录。
+顶层只保留 `project.md`、`readme.md` 和 `documentation.md`。专题按主要职责归类：登录、鉴权、路由等跨业务能力进入 `platform/`；合同档案、处理流和智能助手等业务功能进入 `features/`。同一专题的接口、交互和验证说明放在一起，不因内容类型不同而重复拆分。
+
+不为尚未形成的模块预建空目录或占位链接。新增文档优先归入已有分类，确有多份相关文档需要独立维护时再增加目录。
 
 ---
 

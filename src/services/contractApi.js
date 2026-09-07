@@ -1,3 +1,5 @@
+import { normalizeAuthSession } from '../models/contractPermissions.js'
+
 const AUTH_STORAGE_KEY = 'contract-reviewer-session'
 const AUTH_EXPIRED_EVENT = 'contract-auth-expired'
 const CONTRACT_API_BASE_PATH = `${import.meta.env.DEV ? '/dev' : ''}/contract/api`
@@ -13,16 +15,6 @@ export class ContractApiError extends Error {
   }
 }
 
-function normalizeSession(value) {
-  if (!value || typeof value !== 'object') return null
-
-  const loginCode = typeof value.loginCode === 'string' ? value.loginCode.trim() : ''
-  const userName = typeof value.userName === 'string' ? value.userName.trim() : ''
-  if (!loginCode || !userName) return null
-
-  return { loginCode, userName }
-}
-
 function readResponsePayload(response) {
   return response.json().catch(() => null)
 }
@@ -36,8 +28,9 @@ export function getAuthSession() {
   if (memorySession) return memorySession
 
   try {
-    const storedSession = normalizeSession(JSON.parse(window.sessionStorage.getItem(AUTH_STORAGE_KEY)))
+    const storedSession = normalizeAuthSession(JSON.parse(window.sessionStorage.getItem(AUTH_STORAGE_KEY)))
     if (storedSession) memorySession = storedSession
+    else window.sessionStorage.removeItem(AUTH_STORAGE_KEY)
   } catch {
     try {
       window.sessionStorage.removeItem(AUTH_STORAGE_KEY)
@@ -50,8 +43,8 @@ export function getAuthSession() {
 }
 
 export function saveAuthSession(session) {
-  const normalizedSession = normalizeSession(session)
-  if (!normalizedSession) throw new TypeError('登录响应缺少有效的免登码或审核人名称')
+  const normalizedSession = normalizeAuthSession(session)
+  if (!normalizedSession) throw new TypeError('登录响应缺少有效的免登码、审核人名称或权限等级')
 
   memorySession = normalizedSession
   try {
@@ -93,9 +86,10 @@ export async function loginWithSecretKey(secretKey, { signal } = {}) {
     })
   }
 
-  const session = normalizeSession({
+  const session = normalizeAuthSession({
     loginCode: payload?.login_code,
     userName: payload?.user_name,
+    permissionLevel: payload?.permission_level,
   })
   if (!session) {
     throw new ContractApiError('登录服务返回了无效的会话信息', {

@@ -11,6 +11,7 @@ import {
 } from 'vue'
 import HandwritingPrompt from './HandwritingPrompt.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
+import ContractArchivePanel from './ContractArchivePanel.vue'
 defineOptions({ name: 'ContractLibraryView' })
 const props = defineProps({ active: { type: Boolean, default: true } })
 
@@ -999,7 +1000,7 @@ onBeforeUnmount(() => {
       </button>
     </section>
 
-    <section class="contract-library-reserved" aria-label="合同库预留区域"></section>
+    <ContractArchivePanel :active="active" />
   </section>
 </template>
 
@@ -1018,8 +1019,7 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 
-.contract-agent,
-.contract-library-reserved {
+.contract-agent {
   min-width: 0;
   min-height: 0;
 }
@@ -1943,22 +1943,6 @@ onBeforeUnmount(() => {
   transform: scale(0.72);
 }
 
-.contract-library-reserved {
-  position: relative;
-  isolation: isolate;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-
-.contract-library-reserved::after {
-  display: none;
-}
-
 @keyframes contract-agent-typing {
   to {
     opacity: 0.32;
@@ -2014,7 +1998,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 900px) {
   .contract-library {
-    grid-template-rows: minmax(600px, 1fr) minmax(360px, 0.7fr);
+    grid-template-rows: minmax(600px, 1fr) 680px;
     grid-template-columns: 1fr;
     height: auto;
   }
@@ -2047,11 +2031,10 @@ onBeforeUnmount(() => {
 
 @media (max-width: 640px) {
   .contract-library {
-    grid-template-rows: minmax(560px, calc(100dvh - 126px)) 320px;
+    grid-template-rows: minmax(560px, calc(100dvh - 126px)) 720px;
   }
 
-  .contract-agent,
-  .contract-library-reserved {
+  .contract-agent {
     border-radius: 0;
   }
 

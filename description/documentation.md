@@ -13,6 +13,8 @@
 - Markdown 文件使用小写 kebab-case，例如 `request-flow.md`。
 - 入口文件可使用约定名称，例如 `project.md` 和 `readme.md`。
 - 文件名表达阅读主题，不机械复制代码文件或目录名称。
+- `description/` 顶层只保留 `project.md`、`readme.md` 和 `documentation.md`，专题文档放入分类目录。
+- 跨业务的前端基础能力归入 `platform/`，面向用户的业务功能归入 `features/`；当前目录与文档职责见[文档导航](readme.md)。
 - 新建专题目录前，应确认其中存在多份职责相近且需要长期维护的文档。
 
 ### 1.2 按阅读目的组织

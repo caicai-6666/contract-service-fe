@@ -190,6 +190,7 @@ input {
 }
 
 .prototype-workspace__identity {
+  grid-column: 3;
   display: flex;
   gap: 12px;
   align-items: center;

@@ -11,11 +11,12 @@ import {
   watch,
 } from 'vue'
 import ExtractionAiControl from './ExtractionAiControl.vue'
+import ContractDateWheel from './ContractDateWheel.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
 import PdfWorker from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?worker'
 import RollingNumber from './RollingNumber.vue'
-import sleepyEmptyImage from '../assets/瞌睡.webp'
+import sleepyEmptyImage from '../assets/sleep.webp'
 import {
   cancelExtractionRun,
   continueExtractionRun,
@@ -174,6 +175,7 @@ const runsPanelOpen = ref(false)
 const runsLoading = ref(false)
 const runsLoaderVisible = ref(false)
 const runsItemsVisible = ref(true)
+const runsEmptyVisible = ref(false)
 const runsLoadedOnce = ref(false)
 const runsError = ref('')
 const extractionRuns = ref([])
@@ -284,6 +286,7 @@ let eventStreamController = null
 let runsListController = null
 let runRestoreController = null
 let runsRefreshTimer = null
+let runsEmptyRevealTimer = null
 let reconnectTimer = null
 let deduplicationRefreshTimer = null
 let workflowScrollExtensionFrame = null
@@ -304,6 +307,8 @@ const reviewFileName = ref('')
 const reviewFileNameModified = ref(false)
 const ingestionPending = ref(false)
 const ingestionErrors = ref([])
+const ingestionIssues = ref([])
+const activeIngestionIssueTarget = ref('')
 const ingestionReceipt = ref(null)
 const clauseInsertIndex = ref(null)
 const clauseInsertError = ref('')
@@ -389,7 +394,7 @@ const selectedFilePageCountLabel = computed(() => {
 const canCancelExtractionRun = computed(() => Boolean(
   currentRunId.value
   && workflowStarted.value
-  && !['cancelled', 'expired', 'unavailable'].includes(currentRunStatus.value),
+  && !['cancelled', 'expired', 'unavailable', 'ingested'].includes(currentRunStatus.value),
 ))
 const filePreparationLabel = computed(() => {
   if (selectedSourceKind.value === 'image' && imageConversionStatus.value === 'converting') {
@@ -399,7 +404,9 @@ const filePreparationLabel = computed(() => {
   if (cancellationPending.value) return '正在取消并释放任务资源'
   if (coreDefinitionsLoading.value) return '正在准备 Core 审核表单'
   if (uploadInProgress.value) return '正在上传并校验 PDF'
+  if (currentRunStatus.value === 'ingested') return '任务结束'
   if (currentRunStatus.value === 'not_a_contract') return '未识别为合同文档'
+  if (currentRunStatus.value === 'duplicate_rejected') return '发现重复合同，处理已终止'
   if (currentRunStatus.value === 'awaiting_deduplication_review') return '等待查重审核'
   if (workflowError.value) return workflowError.value
   if (workflowRewinding.value) return '正在退回起点'
@@ -415,6 +422,7 @@ const extractionControlLabel = computed(() => {
   if (cancellationPending.value) return '正在取消任务'
   if (coreDefinitionsLoading.value) return '正在准备表单'
   if (uploadInProgress.value) return '正在创建任务'
+  if (currentRunStatus.value === 'ingested') return '任务结束'
   if (canCancelExtractionRun.value) return '取消任务'
   if (workflowRewinding.value) return '正在回退'
   if (workflowStopped.value) return '重新提取'
@@ -425,6 +433,7 @@ const extractionSecondaryLabel = computed(() => {
   if (cancellationPending.value) return '正在释放任务资源'
   if (coreDefinitionsLoading.value) return '正在加载 Core 定义'
   if (uploadInProgress.value) return '正在上传并校验'
+  if (currentRunStatus.value === 'ingested') return '合同已正式入库'
   if (canCancelExtractionRun.value) return workflowRunning.value
     ? '处理中，点击取消'
     : '点击取消并释放任务'
@@ -437,6 +446,7 @@ const extractionControlVisible = computed(() => (
   Boolean(selectedFile.value && coverPresentationReady.value)
   || canCancelExtractionRun.value
   || cancellationPending.value
+  || currentRunStatus.value === 'ingested'
   || (isRestoredRun.value && workflowRewinding.value)
 ))
 const extractionControlDisabled = computed(() => {
@@ -472,16 +482,29 @@ const coverDimensionsLabel = computed(() => {
   return `${Math.round(width)} × ${Math.round(height)} ${unit}`
 })
 const resultAvailable = computed(() => (
+  !['duplicate_rejected', 'awaiting_deduplication_review'].includes(currentRunStatus.value) && (
   availableSections.value.some((section) => section === 'core' || section === 'clause')
   || extractionDraft.value?.core !== null && extractionDraft.value?.core !== undefined
   || Array.isArray(extractionDraft.value?.clauses)
+  )
 ))
 const resultComplete = computed(() => stageOrder.every((stageId) => stages[stageId].status === 'succeeded'))
 const canIngestResult = computed(() => (
+  !['duplicate_rejected', 'awaiting_deduplication_review'].includes(currentRunStatus.value) &&
   resultComplete.value
   && Boolean(currentRunId.value)
   && !ingestionPending.value
   && !ingestionReceipt.value
+))
+const ingestionActionCharacters = computed(() => Array.from(
+  ingestionPending.value
+    ? '正在正式入库'
+    : resultComplete.value
+      ? '正式入库'
+      : '等待全部阶段完成',
+))
+const unresolvedIngestionIssueCount = computed(() => (
+  ingestionIssues.value.filter((issue) => !issue.resolved).length
 ))
 const resultStats = computed(() => ({
   fields: extractionDraft.value?.core && typeof extractionDraft.value.core === 'object'
@@ -489,7 +512,14 @@ const resultStats = computed(() => ({
     : 0,
   clauses: clauseReviewModel.value.length,
 }))
-const deduplicationCandidates = computed(() => deduplicationReview.value?.candidates || [])
+const deduplicationCandidates = computed(() => {
+  const candidates = deduplicationReview.value?.candidates
+  if (!Array.isArray(candidates)) return []
+  return candidates.map((candidate) => ({
+    ...candidate,
+    reviewer: typeof candidate?.reviewer === 'string' ? candidate.reviewer.trim() : '',
+  }))
+})
 const draftClauses = computed(() => clauseReviewModel.value)
 const clauseReviewAvailable = computed(() => (
   availableSections.value.includes('clause') || Array.isArray(extractionDraft.value?.clauses)
@@ -519,6 +549,11 @@ function stageTone(status) {
 }
 
 function stageStatusLabel(stage) {
+  if (currentRunStatus.value === 'duplicate_rejected') {
+    if (stage.id === 'duplication') return '发现重复合同'
+    if (!['detection', 'duplication'].includes(stage.id)) return '流程已终止'
+  }
+  if (currentRunStatus.value === 'awaiting_deduplication_review' && !['detection', 'duplication'].includes(stage.id)) return '等待查重审核'
   if (stage.id === 'detection' && documentDetection.value?.is_contract === false) {
     return '非合同文档'
   }
@@ -965,6 +1000,44 @@ function emptyCoreReviewItem(definition) {
   return Object.fromEntries(definition.properties.map((property) => [property.code, null]))
 }
 
+function isSigningDateProperty(property) {
+  return property?.type === 'string' && property.name.replaceAll(/\s/g, '') === '签订日期'
+}
+
+function normalizeSigningDateValue(value) {
+  if (value === null || value === undefined || value === '') return null
+  const text = String(value).trim()
+  const match = /^(\d{4})\s*(?:[-/.年]\s*)?(\d{1,2})\s*(?:[-/.月]\s*)?(\d{1,2})(?:日)?(?:[T\s].*)?$/.exec(text)
+  if (!match) return text
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const candidate = new Date(Date.UTC(year, month - 1, day))
+  if (
+    candidate.getUTCFullYear() !== year
+    || candidate.getUTCMonth() !== month - 1
+    || candidate.getUTCDate() !== day
+  ) return text
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function isValidCanonicalSigningDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || '')
+  if (!match) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const candidate = new Date(Date.UTC(year, month - 1, day))
+  return candidate.getUTCFullYear() === year
+    && candidate.getUTCMonth() === month - 1
+    && candidate.getUTCDate() === day
+}
+
+function normalizeCorePropertyValue(property, value) {
+  return isSigningDateProperty(property) ? normalizeSigningDateValue(value) : value
+}
+
 function initializeCoreReviewModel(definitions = coreDefinitions.value) {
   coreReviewModel.clear()
   definitions.forEach((definition) => {
@@ -988,13 +1061,16 @@ function normalizeCoreReviewItem(definition, rawValue) {
   if (rawValue === null || rawValue === undefined) return item
 
   if (definition.properties.length === 1 && typeof rawValue !== 'object') {
-    item[definition.properties[0].code] = rawValue
+    const property = definition.properties[0]
+    item[property.code] = normalizeCorePropertyValue(property, rawValue)
     return item
   }
   if (typeof rawValue !== 'object' || Array.isArray(rawValue)) return item
 
   definition.properties.forEach((property) => {
-    if (Object.hasOwn(rawValue, property.code)) item[property.code] = rawValue[property.code]
+    if (Object.hasOwn(rawValue, property.code)) {
+      item[property.code] = normalizeCorePropertyValue(property, rawValue[property.code])
+    }
   })
   return item
 }
@@ -1116,7 +1192,7 @@ function applyExtractionSnapshot(snapshot, {
 
   if (
     openDeduplication
-    && run.status === 'awaiting_deduplication_review'
+    && ['awaiting_deduplication_review', 'duplicate_rejected'].includes(run.status)
     && run.deduplication
   ) {
     presentDeduplicationReview(run.deduplication)
@@ -1130,9 +1206,9 @@ function presentRestoredRunDetail(snapshot) {
   if (!run) return
 
   if (
-    run.status === 'awaiting_deduplication_review'
+    ['awaiting_deduplication_review', 'duplicate_rejected'].includes(run.status)
     && run.deduplication
-    && !run.deduplication.continued_at
+    && (run.status === 'duplicate_rejected' || !run.deduplication.continued_at)
   ) {
     presentDeduplicationReview(run.deduplication)
     return
@@ -1203,8 +1279,19 @@ async function handleExtractionEvent(frame, generation) {
     currentRunStatus.value = 'not_a_contract'
     workflowRunning.value = false
     requestDetail('stage', 'detection')
+  } else if (event.event_type === 'run.duplicate_rejected') {
+    currentRunStatus.value = 'duplicate_rejected'
+    workflowRunning.value = false
+    uploadInProgress.value = false
+    continuationPending.value = false
+    continuationError.value = ''
+    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
+    reconnectTimer = null
+    presentDeduplicationReview(event.deduplication || deduplicationReview.value)
+    eventStreamController?.abort()
   } else if (event.event_type === 'run.deduplication_review_required') {
     currentRunStatus.value = 'awaiting_deduplication_review'
+    workflowRunning.value = true
     presentDeduplicationReview(event.deduplication)
   } else if (event.event_type === 'run.continued') {
     continuationPending.value = false
@@ -1307,6 +1394,7 @@ function resetWorkflowState({ preserveDetail = false } = {}) {
   reviewFileNameModified.value = false
   ingestionPending.value = false
   clearIngestionErrors()
+  clearIngestionIssues()
   ingestionReceipt.value = null
   initializeCoreReviewModel()
   retractingStageIds.clear()
@@ -1511,6 +1599,7 @@ function finalizeCancelledWorkflow(runId) {
   reviewFileNameModified.value = false
   ingestionPending.value = false
   clearIngestionErrors()
+  clearIngestionIssues()
   ingestionReceipt.value = null
   initializeCoreReviewModel()
   stopWorkflow({ force: true, clearRestoredInput })
@@ -1549,6 +1638,7 @@ async function cancelCurrentExtractionRun() {
 }
 
 async function retryStage(stageId) {
+  if (['duplicate_rejected', 'awaiting_deduplication_review'].includes(currentRunStatus.value)) return
   const stage = stages[stageId]
   const backendStageCode = localStageToBackend[stageId]
   if (!currentRunId.value || !backendStageCode) return
@@ -1651,6 +1741,7 @@ async function refreshExtractionRuns({ showLoader = !runsLoadedOnce.value } = {}
   const loaderStartedAt = performance.now()
   if (showLoader) {
     runsItemsVisible.value = false
+    runsEmptyVisible.value = false
     runsLoaderVisible.value = true
   }
 
@@ -1671,6 +1762,9 @@ async function refreshExtractionRuns({ showLoader = !runsLoadedOnce.value } = {}
 
     extractionRuns.value = nextRuns
     runsLoadedOnce.value = true
+    if (!showLoader) {
+      runsEmptyVisible.value = runsPanelOpen.value && !nextRuns.length
+    }
     animateUpdatedExtractionRuns(updatedRunIds)
   } catch (error) {
     if (error?.name !== 'AbortError') {
@@ -1763,17 +1857,33 @@ async function restoreExtractionRun(run) {
 function closeRunsPanel() {
   runsPanelOpen.value = false
   stopRunsRefreshTimer()
+  clearRunsEmptyRevealTimer()
   runsListController?.abort()
   runsListController = null
   runsLoading.value = false
   runsLoaderVisible.value = false
   runsItemsVisible.value = true
+  runsEmptyVisible.value = false
   updatingRunIds.clear()
+}
+
+function clearRunsEmptyRevealTimer() {
+  if (runsEmptyRevealTimer !== null) window.clearTimeout(runsEmptyRevealTimer)
+  runsEmptyRevealTimer = null
 }
 
 function revealExtractionRuns() {
   if (!runsPanelOpen.value) return
   runsItemsVisible.value = true
+  clearRunsEmptyRevealTimer()
+  if (runsError.value || extractionRuns.value.length) return
+  const revealDelay = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 240
+  runsEmptyRevealTimer = window.setTimeout(() => {
+    runsEmptyRevealTimer = null
+    if (runsPanelOpen.value && !runsError.value && !extractionRuns.value.length) {
+      runsEmptyVisible.value = true
+    }
+  }, revealDelay)
 }
 
 function toggleRunsPanel() {
@@ -1786,8 +1896,10 @@ function toggleRunsPanel() {
   runsPanelOpen.value = true
   if (!runsLoadedOnce.value && runsLoading.value) {
     runsItemsVisible.value = false
+    runsEmptyVisible.value = false
     runsLoaderVisible.value = true
   } else {
+    runsEmptyVisible.value = runsLoadedOnce.value && !runsError.value && !extractionRuns.value.length
     refreshExtractionRuns()
   }
   startRunsRefreshTimer()
@@ -2318,7 +2430,7 @@ function coreReviewItemActive(definitionCode, itemIndex) {
 }
 
 function coreReviewValueMissing(definitionCode, itemIndex, property) {
-  if (!property.required || !coreReviewItemActive(definitionCode, itemIndex)) return false
+  if (!isSigningDateProperty(property) && (!property.required || !coreReviewItemActive(definitionCode, itemIndex))) return false
   const value = coreReviewModel.get(definitionCode)?.[itemIndex]?.[property.code]
   return !coreReviewValuePresent(value)
 }
@@ -2366,6 +2478,13 @@ function updateCoreReviewValue(definition, itemIndex, property, event) {
   modifiedFields.add(coreReviewPath(definition.code, itemIndex, property.code))
 }
 
+function updateSigningDateValue(definition, itemIndex, property, value) {
+  const item = coreReviewModel.get(definition.code)?.[itemIndex]
+  if (!item) return
+  item[property.code] = value || null
+  modifiedFields.add(coreReviewPath(definition.code, itemIndex, property.code))
+}
+
 function updateReviewFileName(event) {
   reviewFileName.value = event.target.value
   reviewFileNameModified.value = true
@@ -2404,36 +2523,114 @@ function serializeCoreReview() {
   }))
 }
 
+function ingestionIssue(id, message, target, detail = null) {
+  return { id, message, target, detail, resolved: false, baseline: ingestionTargetFingerprint(target) }
+}
+
 function validateIngestionDraft(core, clauses) {
-  const errors = []
+  const issues = []
   const fileName = reviewFileName.value.trim()
-  if (!fileName) errors.push('请填写最终展示文件名')
-  if (fileName.length > 255) errors.push('最终展示文件名不能超过 255 个字符')
+  if (!fileName) issues.push(ingestionIssue('file-name:required', '请填写最终展示文件名', 'file-name'))
+  if (fileName.length > 255) {
+    issues.push(ingestionIssue('file-name:max-length', '最终展示文件名不能超过 255 个字符', 'file-name'))
+  }
   if (/[\\/:*?"<>|\r\n]/.test(fileName) || /^[ .]|[ .]$/.test(fileName)) {
-    errors.push('最终展示文件名包含不允许的字符，或以空格、句点开头或结尾')
+    issues.push(ingestionIssue(
+      'file-name:format',
+      '最终展示文件名包含不允许的字符，或以空格、句点开头或结尾',
+      'file-name',
+    ))
   }
   for (const definition of coreDefinitions.value) {
     const value = core[definition.code]
     const items = definition.cardinality === 'multiple'
       ? (Array.isArray(value) ? value : [])
       : value === null ? [] : [definition.properties.length === 1 ? { [definition.properties[0].code]: value } : value]
-    for (const item of items) {
+    // 签订日期是入库必填项，整个 Core 对象为空时也不能跳过校验。
+    if (!items.length) {
+      definition.properties.filter(isSigningDateProperty).forEach((property) => {
+        const target = coreReviewPath(definition.code, 0, property.code)
+        issues.push(ingestionIssue(`${target}:required`, '正式入库前请填写签订日期', target))
+      })
+    }
+    for (const [itemIndex, item] of items.entries()) {
       definition.properties.filter((property) => (
-        property.required && !coreReviewValuePresent(item?.[property.code])
+        (property.required || isSigningDateProperty(property)) && !coreReviewValuePresent(item?.[property.code])
       )).forEach((property) => {
-        errors.push(`请填写“${definition.name}”中的必填项“${property.name}”`)
+        const target = coreReviewPath(definition.code, itemIndex, property.code)
+        issues.push(ingestionIssue(
+          `${target}:required`,
+          isSigningDateProperty(property) ? '正式入库前请填写签订日期' : `请填写“${definition.name}”中的必填项“${property.name}”`,
+          target,
+        ))
+      })
+      definition.properties.filter((property) => (
+        isSigningDateProperty(property)
+        && coreReviewValuePresent(item?.[property.code])
+        && !isValidCanonicalSigningDate(item[property.code])
+      )).forEach((property) => {
+        const target = coreReviewPath(definition.code, itemIndex, property.code)
+        issues.push(ingestionIssue(
+          `${target}:date-format`,
+          '请选择有效的签订日期',
+          target,
+        ))
       })
     }
   }
-  if (!clauses.length) errors.push('至少需要保留一条合同条款')
+  if (!clauses.length) issues.push(ingestionIssue('clauses:required', '至少需要保留一条合同条款', 'clauses'))
   const pageCount = processedDocument.value?.pageCount
   for (const [index, clause] of clauses.entries()) {
-    if (!clause.content.trim()) errors.push(`第 ${index + 1} 条条款正文不能为空`)
+    const target = `clause:${clause.clause_id || clause.order}`
+    if (!clause.content.trim()) {
+      issues.push(ingestionIssue(`${target}:content`, `第 ${index + 1} 条条款正文不能为空`, target))
+    }
     if (Number.isInteger(pageCount) && clause.end_page > pageCount) {
-      errors.push(`第 ${index + 1} 条条款页码不能超过处理版 PDF 的 ${pageCount} 页`)
+      issues.push(ingestionIssue(
+        `${target}:page-range`,
+        `第 ${index + 1} 条条款页码不能超过处理版 PDF 的 ${pageCount} 页`,
+        target,
+      ))
     }
   }
-  return errors
+  return issues
+}
+
+function ingestionTargetFromLocation(location) {
+  const fields = Array.isArray(location) ? location.filter((item) => item !== 'body') : []
+  if (fields[0] === 'file_name') return 'file-name'
+  if (fields[0] === 'core') {
+    const definition = coreDefinitions.value.find((item) => item.code === fields[1])
+    if (!definition) return 'core'
+    const itemIndex = fields.find((item, index) => index > 1 && Number.isInteger(item)) || 0
+    const property = definition.properties.find((item) => fields.includes(item.code))
+    return property ? coreReviewPath(definition.code, itemIndex, property.code) : `core:${definition.code}`
+  }
+  if (fields[0] === 'clauses') {
+    const clauseIndex = fields.find((item) => Number.isInteger(item))
+    const clause = Number.isInteger(clauseIndex) ? draftClauses.value[clauseIndex] : null
+    return clause ? `clause:${clause.clause_id || clause.order}` : 'clauses'
+  }
+  return 'result'
+}
+
+function ingestionTargetFingerprint(target) {
+  if (target === 'file-name') return reviewFileName.value
+  if (target === 'clauses') return String(draftClauses.value.length)
+  if (target.startsWith('core:')) {
+    const [, definitionCode, rawItemIndex, propertyCode] = target.split(':')
+    return JSON.stringify(coreReviewModel.get(definitionCode)?.[Number(rawItemIndex)]?.[propertyCode] ?? null)
+  }
+  if (target.startsWith('clause:')) {
+    const clauseId = target.slice('clause:'.length)
+    const clause = draftClauses.value.find((item) => String(item.clause_id || item.order) === clauseId)
+    return clause ? JSON.stringify({
+      content: clauseEditableContent(clause),
+      startPage: clause.start_page,
+      endPage: clause.end_page,
+    }) : ''
+  }
+  return ''
 }
 
 function ingestionFieldLabel(location) {
@@ -2513,6 +2710,49 @@ function ingestionFailureMessages(error) {
   return [genericMessages[error?.status] || fallbackMessage]
 }
 
+function ingestionFailureIssues(error) {
+  if (error?.status !== 422) return []
+  const details = error?.payload?.detail
+  if (!Array.isArray(details) || !details.length) {
+    // 业务校验返回字符串 detail，保留原始原因，不用通用提示覆盖。
+    const message = typeof details === 'string' ? details.trim() : ''
+    const isClauseParentError = message.includes('父条款必须先于当前条款出现')
+    return [ingestionIssue(
+      'backend:result:validation',
+      message || '入库校验未通过，服务端未返回具体原因，请稍后重试',
+      'result',
+      isClauseParentError ? {
+        suggestion: '条款层级关系可能存在提取偏差，建议通过“新建提取”重新上传原文件并执行提取流程。',
+      } : null,
+    )]
+  }
+
+  const detailsByTarget = new Map()
+  details.forEach((detail) => {
+    const target = ingestionTargetFromLocation(detail?.loc)
+    const targetDetails = detailsByTarget.get(target) || []
+    targetDetails.push(detail)
+    detailsByTarget.set(target, targetDetails)
+  })
+
+  return [...detailsByTarget.entries()].map(([target, targetDetails]) => {
+    const missingDetail = targetDetails.find((detail) => (
+      detail?.type === 'missing' || detail?.type === 'string_too_short'
+    ))
+    const preferredDetail = missingDetail || targetDetails[0]
+    const message = missingDetail || targetDetails.length === 1
+      ? localizedIngestionDetail(preferredDetail)
+      : `${ingestionFieldLabel(preferredDetail?.loc)}的值或数据类型不符合入库要求，请检查后重试`
+    const locationKey = Array.isArray(preferredDetail?.loc) ? preferredDetail.loc.join('.') : target
+    return ingestionIssue(
+      `backend:${locationKey}:${preferredDetail?.type || 'validation'}`,
+      message,
+      target,
+      preferredDetail,
+    )
+  })
+}
+
 function clearIngestionErrors() {
   if (ingestionErrorTimer !== null) window.clearTimeout(ingestionErrorTimer)
   ingestionErrorTimer = null
@@ -2529,10 +2769,8 @@ function showIngestionErrors(errors) {
   }, 8000)
 }
 
-async function submitIngestion() {
-  if (!canIngestResult.value) return
-  const core = serializeCoreReview()
-  const clauses = draftClauses.value.map((clause, index) => ({
+function serializeClauseReview() {
+  return draftClauses.value.map((clause, index) => ({
     clause_id: clause.clause_id,
     order: index + 1,
     identifier: clause.identifier,
@@ -2544,9 +2782,96 @@ async function submitIngestion() {
     end_page: clause.end_page,
     content: clauseEditableContent(clause),
   }))
-  const validationErrors = validateIngestionDraft(core, clauses)
-  if (validationErrors.length) {
-    showIngestionErrors(validationErrors)
+}
+
+function clearIngestionIssues() {
+  ingestionIssues.value = []
+  activeIngestionIssueTarget.value = ''
+}
+
+function issueTargetSelector(target) {
+  return `[data-ingestion-target="${String(target).replaceAll('"', '\\"')}"]`
+}
+
+function scrollToIngestionIssue(issue) {
+  if (!issue?.target || issue.target === 'result') return
+  const panel = detailPanel.value?.querySelector('.ingestion-detail')
+  const target = panel?.querySelector(issueTargetSelector(issue.target))
+  if (!(panel instanceof HTMLElement) || !(target instanceof HTMLElement)) return
+
+  const panelRect = panel.getBoundingClientRect()
+  const targetRect = target.getBoundingClientRect()
+  activeIngestionIssueTarget.value = issue.target
+  panel.scrollTo({
+    top: Math.max(0, panel.scrollTop + targetRect.top - panelRect.top - 58),
+    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+  })
+  schedule(() => {
+    if (activeIngestionIssueTarget.value === issue.target) activeIngestionIssueTarget.value = ''
+  }, 1600)
+}
+
+function showIngestionIssues(issues) {
+  clearIngestionErrors()
+  const uniqueIssues = new Map(issues.filter(Boolean).map((issue) => [issue.id, issue]))
+  ingestionIssues.value = [...uniqueIssues.values()]
+  const firstIssue = ingestionIssues.value.find((issue) => !issue.resolved)
+  if (firstIssue) nextTick(() => scrollToIngestionIssue(firstIssue))
+}
+
+function refreshIngestionIssues(targets) {
+  if (!ingestionIssues.value.length) return
+  const targetSet = targets instanceof Set ? targets : new Set(targets || [])
+  if (!targetSet.size) return
+  const currentIssues = validateIngestionDraft(serializeCoreReview(), serializeClauseReview())
+  const currentIds = new Set(currentIssues.map((issue) => issue.id))
+  const currentTargets = new Set(currentIssues.map((issue) => issue.target))
+  const existingIssues = new Map(ingestionIssues.value.map((issue) => [issue.id, issue]))
+  currentIssues.forEach((issue) => {
+    if (targetSet.has(issue.target) && !existingIssues.has(issue.id)) existingIssues.set(issue.id, issue)
+  })
+
+  let issueResolved = false
+  const nextIssues = [...existingIssues.values()].map((issue) => {
+    if (!targetSet.has(issue.target)) return issue
+    const resolved = issue.id.startsWith('backend:')
+      ? !currentTargets.has(issue.target) && ingestionTargetFingerprint(issue.target) !== issue.baseline
+      : !currentIds.has(issue.id)
+    if (!issue.resolved && resolved) issueResolved = true
+    return { ...issue, resolved }
+  })
+  ingestionIssues.value = nextIssues
+
+  if (issueResolved) {
+    const nextIssue = nextIssues.find((issue) => !issue.resolved)
+      || [...nextIssues].reverse().find((issue) => issue.resolved)
+    if (nextIssue) nextTick(() => scrollToIngestionIssue(nextIssue))
+  }
+}
+
+function handleIngestionIssueFocusout(event) {
+  if (!ingestionIssues.value.length || !(event.target instanceof Element)) return
+
+  const relatedTarget = event.relatedTarget instanceof Node ? event.relatedTarget : null
+  const editor = event.currentTarget
+  const targets = new Set()
+  let container = event.target.closest('[data-ingestion-target]')
+  while (container && editor instanceof Element && editor.contains(container)) {
+    if (!relatedTarget || !container.contains(relatedTarget)) {
+      targets.add(container.dataset.ingestionTarget)
+    }
+    container = container.parentElement?.closest('[data-ingestion-target]') || null
+  }
+  if (targets.size) nextTick(() => refreshIngestionIssues(targets))
+}
+
+async function submitIngestion() {
+  if (!canIngestResult.value) return
+  const core = serializeCoreReview()
+  const clauses = serializeClauseReview()
+  const validationIssues = validateIngestionDraft(core, clauses)
+  if (validationIssues.length) {
+    showIngestionIssues(validationIssues)
     return
   }
 
@@ -2567,8 +2892,13 @@ async function submitIngestion() {
     workflowRunning.value = false
     extractionRuns.value = extractionRuns.value.filter((run) => run.run_id !== runId)
     eventStreamController?.abort()
+    clearIngestionIssues()
   } catch (error) {
-    if (error?.name !== 'AbortError') showIngestionErrors(ingestionFailureMessages(error))
+    if (error?.name !== 'AbortError') {
+      const validationIssues = ingestionFailureIssues(error)
+      if (validationIssues.length) showIngestionIssues(validationIssues)
+      else showIngestionErrors(ingestionFailureMessages(error))
+    }
   } finally {
     if (ingestionRequestController === controller) {
       ingestionRequestController = null
@@ -2919,7 +3249,7 @@ function handleWorkflowWheel(event) {
 function handleWorkspaceClick(event) {
   if (!detailMode.value && !queuedDetailMode.value) return
   if (!(event.target instanceof Element)) return
-  if (event.target.closest('.ingestion-detail')) return
+  if (event.target.closest('.ingestion-detail, .ingestion-validation-panel')) return
   if (event.target.closest([
     '.workflow-input-node',
     '.workflow-stage-node',
@@ -3100,7 +3430,7 @@ onBeforeUnmount(() => {
 
         <Transition name="contract-runs-empty" appear>
           <div
-            v-if="!runsError && !extractionRuns.length && runsItemsVisible"
+            v-if="!runsError && !extractionRuns.length && runsItemsVisible && runsEmptyVisible"
             class="contract-runs-panel__empty"
           >
             <img :src="sleepyEmptyImage" alt="暂无进行的任务" />
@@ -3296,19 +3626,19 @@ onBeforeUnmount(() => {
           </g>
 
           <g class="workflow-link" :class="`is-${edgeState('field')}`">
-            <path class="workflow-link__bed" d="M1750 321 C1770 321 1750 144 1770 144" />
-            <path class="workflow-link__signal" pathLength="100" d="M1750 321 C1770 321 1750 144 1770 144" />
-            <path class="workflow-link__comet" pathLength="100" d="M1750 321 C1770 321 1750 144 1770 144" />
+            <path class="workflow-link__bed" d="M1710 321 C1750 321 1730 144 1770 144" />
+            <path class="workflow-link__signal" pathLength="100" d="M1710 321 C1750 321 1730 144 1770 144" />
+            <path class="workflow-link__comet" pathLength="100" d="M1710 321 C1750 321 1730 144 1770 144" />
           </g>
           <g class="workflow-link" :class="`is-${edgeState('clause')}`">
-            <path class="workflow-link__bed" d="M1750 321 C1757 321 1763 321 1770 321" />
-            <path class="workflow-link__signal" pathLength="100" d="M1750 321 C1757 321 1763 321 1770 321" />
-            <path class="workflow-link__comet" pathLength="100" d="M1750 321 C1757 321 1763 321 1770 321" />
+            <path class="workflow-link__bed" d="M1710 321 C1730 321 1750 321 1770 321" />
+            <path class="workflow-link__signal" pathLength="100" d="M1710 321 C1730 321 1750 321 1770 321" />
+            <path class="workflow-link__comet" pathLength="100" d="M1710 321 C1730 321 1750 321 1770 321" />
           </g>
           <g class="workflow-link" :class="`is-${edgeState('retrieval')}`">
-            <path class="workflow-link__bed" d="M1750 321 C1770 321 1750 498 1770 498" />
-            <path class="workflow-link__signal" pathLength="100" d="M1750 321 C1770 321 1750 498 1770 498" />
-            <path class="workflow-link__comet" pathLength="100" d="M1750 321 C1770 321 1750 498 1770 498" />
+            <path class="workflow-link__bed" d="M1710 321 C1750 321 1730 498 1770 498" />
+            <path class="workflow-link__signal" pathLength="100" d="M1710 321 C1750 321 1730 498 1770 498" />
+            <path class="workflow-link__comet" pathLength="100" d="M1710 321 C1750 321 1730 498 1770 498" />
           </g>
 
           <g class="workflow-link" :class="`is-${resultEdgeState('field')}`">
@@ -3641,14 +3971,60 @@ onBeforeUnmount(() => {
         class="ingestion-detail-shell"
         :class="[
           `is-${detailMode}`,
-          { 'is-classification': detailMode === 'stage' && selectedStageId === 'classification' },
+          {
+            'is-classification': detailMode === 'stage' && selectedStageId === 'classification',
+            'is-detection': detailMode === 'stage' && selectedStageId === 'detection',
+            'is-naming': detailMode === 'stage' && selectedStageId === 'naming',
+          },
         ]"
       >
+      <Transition name="ingestion-validation-panel">
+        <aside
+          v-if="detailMode === 'result' && ingestionIssues.length"
+          class="ingestion-validation-panel"
+          aria-label="入库校验问题"
+          aria-live="polite"
+        >
+          <header>
+            <div>
+              <span>入库检查</span>
+              <strong>{{ unresolvedIngestionIssueCount ? `${unresolvedIngestionIssueCount} 项待处理` : '全部已解决' }}</strong>
+            </div>
+            <small>{{ ingestionIssues.length }} 项</small>
+          </header>
+          <ul>
+            <li
+              v-for="issue in ingestionIssues"
+              :key="issue.id"
+              :class="{ 'is-resolved': issue.resolved }"
+            >
+              <button
+                type="button"
+                :disabled="!issue.target || issue.target === 'result'"
+                @click="scrollToIngestionIssue(issue)"
+              >
+                <span class="ingestion-validation-panel__mark" aria-hidden="true">
+                  <svg v-if="issue.resolved" viewBox="0 0 16 16"><path d="m3.2 8.2 3 3 6.6-6.6" /></svg>
+                  <svg v-else viewBox="0 0 16 16"><path d="m4.2 4.2 7.6 7.6m0-7.6-7.6 7.6" /></svg>
+                </span>
+                <span class="ingestion-validation-panel__copy">
+                  <strong>{{ issue.message }}</strong>
+                  <small>{{ issue.resolved ? '已解决' : issue.detail?.suggestion || (!issue.target || issue.target === 'result' ? '服务端未提供字段位置，请按提示检查后重新提交' : '点击定位') }}</small>
+                </span>
+              </button>
+            </li>
+          </ul>
+        </aside>
+      </Transition>
       <aside
         class="ingestion-detail"
         :class="[
           `is-${detailMode}`,
-          { 'is-classification': detailMode === 'stage' && selectedStageId === 'classification' },
+          {
+            'is-classification': detailMode === 'stage' && selectedStageId === 'classification',
+            'is-detection': detailMode === 'stage' && selectedStageId === 'detection',
+            'is-naming': detailMode === 'stage' && selectedStageId === 'naming',
+          },
         ]"
       >
         <button v-if="detailMode !== 'result'" type="button" class="ingestion-detail__close" aria-label="关闭详情" @click="closeDetail">
@@ -3695,18 +4071,20 @@ onBeforeUnmount(() => {
             :class="{ 'is-refreshing': deduplicationContentRefreshing }"
           >
           <span class="ingestion-detail__eyebrow">查重审核</span>
-          <h3>{{ deduplicationCandidates.length ? '发现可能相关的合同' : '未发现重复合同' }}</h3>
+          <h3>{{ currentRunStatus === 'duplicate_rejected' ? '已发现重复合同' : deduplicationCandidates.length ? '发现可能相关的合同' : '未发现重复合同' }}</h3>
           <p class="ingestion-detail__lead">
-            {{ deduplicationReviewPending
+            {{ currentRunStatus === 'duplicate_rejected'
+              ? '本次提取已终止，后续阶段不会继续执行。你仍可查看重复合同及判断依据。'
+              : deduplicationReviewPending
               ? '提取流程已暂停。请核对候选合同，并在审核期限前确认继续。'
               : '查重审核已经完成，你仍可查看本次返回的候选合同。' }}
           </p>
 
           <div
             class="ingestion-detail__status"
-            :class="deduplicationReviewPending ? 'is-running' : 'is-success'"
+            :class="currentRunStatus === 'duplicate_rejected' ? 'is-failed' : deduplicationReviewPending ? 'is-running' : 'is-success'"
           >
-            <span><i></i>{{ deduplicationReviewPending ? '等待审核' : '已确认继续' }}</span>
+            <span><i></i>{{ currentRunStatus === 'duplicate_rejected' ? '重复合同 · 已终止' : deduplicationReviewPending ? '等待审核' : '已确认继续' }}</span>
             <strong>
               {{ deduplicationReviewPending ? `截止 ${deduplicationDeadline}` : '候选记录已保留' }}
             </strong>
@@ -3734,6 +4112,14 @@ onBeforeUnmount(() => {
                   <h4 :title="candidate.file_name || '未命名候选合同'">
                     {{ candidate.file_name || '未命名候选合同' }}
                   </h4>
+                  <div v-if="candidate.reviewer" class="deduplication-candidate__reviewer">
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                      <circle cx="10" cy="7" r="3" />
+                      <path d="M4.5 16c.45-3.05 2.3-4.6 5.5-4.6s5.05 1.55 5.5 4.6" />
+                    </svg>
+                    <span>审核人</span>
+                    <strong :title="candidate.reviewer">{{ candidate.reviewer }}</strong>
+                  </div>
                 </div>
                 <strong class="deduplication-candidate__relation">
                   <i></i>{{ candidateRelationLabel(candidate.relation) }}
@@ -3939,10 +4325,14 @@ onBeforeUnmount(() => {
             当前仍有处理路径未完成，可以先校对已有结果。
           </div>
 
-          <div class="extraction-result-editor">
+          <div class="extraction-result-editor" @focusout="handleIngestionIssueFocusout">
             <section class="extraction-result-section extraction-result-section--file-name">
               <header><strong>合同名称</strong><span>最终展示名称</span></header>
-              <label class="extraction-result-file-name">
+              <label
+                class="extraction-result-file-name"
+                :class="{ 'is-issue-focused': activeIngestionIssueTarget === 'file-name' }"
+                data-ingestion-target="file-name"
+              >
                 <span>文件名主体<b>必填</b></span>
                 <input
                   type="text"
@@ -3952,7 +4342,6 @@ onBeforeUnmount(() => {
                   placeholder="请输入最终展示文件名（无需扩展名）"
                   @input="updateReviewFileName"
                 />
-                <small>由模型建议，可在正式入库前修改；无需填写 .pdf 扩展名。</small>
               </label>
             </section>
             <section v-if="coreReviewFields.length" class="extraction-result-section">
@@ -3967,7 +4356,11 @@ onBeforeUnmount(() => {
                 v-for="field in coreReviewFields"
                 :key="field.code"
                 class="extraction-result-item"
-                :class="{ 'is-single': field.cardinality === 'single' }"
+                :class="{
+                  'is-single': field.cardinality === 'single',
+                  'is-issue-focused': activeIngestionIssueTarget === `core:${field.code}`,
+                }"
+                :data-ingestion-target="`core:${field.code}`"
               >
                 <h4 class="extraction-result-item__title">
                   <span>{{ field.name }}</span>
@@ -3975,7 +4368,8 @@ onBeforeUnmount(() => {
                     v-if="field.cardinality === 'single' && field.properties.length === 1"
                     class="extraction-result-item__title-meta"
                   >
-                    <b v-if="field.properties[0].required">对象内必填</b>
+                    <b v-if="isSigningDateProperty(field.properties[0])">入库必填</b>
+                    <b v-else-if="field.properties[0].required">对象内必填</b>
                     <i
                       v-if="modifiedFields.has(coreReviewPath(field.code, 0, field.properties[0].code))"
                     >已修改</i>
@@ -4005,14 +4399,23 @@ onBeforeUnmount(() => {
                     class="extraction-result-property"
                     :class="{
                       'is-required-empty': coreReviewValueMissing(field.code, itemIndex, property),
+                      'is-issue-focused': activeIngestionIssueTarget === coreReviewPath(field.code, itemIndex, property.code),
                     }"
+                    :data-ingestion-target="coreReviewPath(field.code, itemIndex, property.code)"
                   >
                     <span v-if="field.cardinality === 'multiple' || field.properties.length > 1">
-                      {{ property.name }}<b v-if="property.required">对象内必填</b>
+                      {{ property.name }}<b v-if="isSigningDateProperty(property)">入库必填</b><b v-else-if="property.required">对象内必填</b>
                       <i v-if="modifiedFields.has(coreReviewPath(field.code, itemIndex, property.code))">已修改</i>
                     </span>
+                    <ContractDateWheel
+                      v-if="isSigningDateProperty(property)"
+                      :model-value="coreReviewInputValue(field.code, itemIndex, property)"
+                      :disabled="Boolean(ingestionReceipt)"
+                      :required="property.required && coreReviewItemActive(field.code, itemIndex)"
+                      @update:model-value="updateSigningDateValue(field, itemIndex, property, $event)"
+                    />
                     <div
-                      v-if="property.type === 'boolean'"
+                      v-else-if="property.type === 'boolean'"
                       class="extraction-result-boolean-control"
                       :class="{
                         'is-open': openBooleanControlKey === booleanReviewControlKey(field.code, itemIndex, property.code),
@@ -4120,7 +4523,12 @@ onBeforeUnmount(() => {
               </article>
             </section>
 
-            <section v-if="clauseReviewAvailable" class="extraction-result-section extraction-result-section--clauses">
+            <section
+              v-if="clauseReviewAvailable"
+              class="extraction-result-section extraction-result-section--clauses"
+              :class="{ 'is-issue-focused': activeIngestionIssueTarget === 'clauses' }"
+              data-ingestion-target="clauses"
+            >
               <header><strong>合同条款</strong><span>{{ draftClauses.length }} 条</span></header>
               <div
                 ref="clauseReviewListRef"
@@ -4130,8 +4538,12 @@ onBeforeUnmount(() => {
                   v-for="(clause, clauseIndex) in draftClauses"
                   :key="clause.clause_id"
                   class="clause-review-item-shell"
-                  :class="{ 'is-removing': removingClauseIds.has(clause.clause_id) }"
+                  :class="{
+                    'is-removing': removingClauseIds.has(clause.clause_id),
+                    'is-issue-focused': activeIngestionIssueTarget === `clause:${clause.clause_id || clause.order}`,
+                  }"
                   :data-clause-id="clause.clause_id"
+                  :data-ingestion-target="`clause:${clause.clause_id || clause.order}`"
                 >
                   <div class="clause-review-item-shell__content">
                 <div
@@ -4253,17 +4665,46 @@ onBeforeUnmount(() => {
             <div v-if="!coreReviewFields.length && !draftClauses.length" class="ingestion-detail__notice">
               当前草稿已创建，但暂时没有可展示的提取分区。
             </div>
-            <div v-if="ingestionReceipt" class="ingestion-detail__status is-success extraction-ingestion-success">
-              <i></i>
-              <span>合同已正式入库：{{ ingestionReceipt.file_name }}</span>
-            </div>
             <button
               type="button"
-              class="ingestion-detail__primary"
+              class="extraction-ingestion-button"
+              :class="{
+                'is-submitting': ingestionPending,
+                'is-sent': Boolean(ingestionReceipt),
+              }"
               :disabled="!canIngestResult"
+              :aria-label="ingestionReceipt ? '已正式入库' : ingestionActionCharacters.join('')"
               @click="submitIngestion"
             >
-              {{ ingestionPending ? '正在正式入库' : ingestionReceipt ? '已正式入库' : resultComplete ? '正式入库' : '等待全部阶段完成' }}
+              <span class="extraction-ingestion-button__outline" aria-hidden="true"></span>
+              <span class="extraction-ingestion-button__state is-default" aria-hidden="true">
+                <span class="extraction-ingestion-button__icon">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M14.22 21.63c-1.18 0-2.85-.83-4.17-4.8l-.72-2.16-2.16-.72c-3.96-1.32-4.79-2.99-4.79-4.17 0-1.17.83-2.85 4.79-4.18l8.49-2.83c2.12-.71 3.89-.5 4.98.58s1.3 2.86.59 4.98l-2.83 8.49c-1.33 3.98-3 4.81-4.18 4.81ZM7.64 7.03c-2.78.93-3.77 2.03-3.77 2.75s.99 1.82 3.77 2.74l2.52.84c.22.07.4.25.47.47l.84 2.52c.92 2.78 2.03 3.77 2.75 3.77s1.82-.99 2.75-3.77l2.83-8.49c.51-1.54.42-2.8-.23-3.45s-1.91-.73-3.44-.22L7.64 7.03Z" />
+                    <path d="M10.11 14.4a.75.75 0 0 1-.53-1.28l3.58-3.59a.75.75 0 0 1 1.06 1.06l-3.58 3.59a.73.73 0 0 1-.53.22Z" />
+                  </svg>
+                </span>
+                <span class="extraction-ingestion-button__label">
+                  <i
+                    v-for="(character, index) in ingestionActionCharacters"
+                    :key="`${character}-${index}`"
+                    :style="{ '--i': index }"
+                  >{{ character }}</i>
+                </span>
+              </span>
+              <span class="extraction-ingestion-button__state is-sent" aria-hidden="true">
+                <span class="extraction-ingestion-button__icon">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M12 22.75C6.07 22.75 1.25 17.93 1.25 12S6.07 1.25 12 1.25 22.75 6.07 22.75 12 17.93 22.75 12 22.75Zm0-20C6.9 2.75 2.75 6.9 2.75 12s4.15 9.25 9.25 9.25 9.25-4.15 9.25-9.25S17.1 2.75 12 2.75Z" />
+                    <path d="M10.58 15.58a.75.75 0 0 1-.53-.22l-2.83-2.83a.75.75 0 0 1 1.06-1.06l2.3 2.3 5.14-5.14a.75.75 0 0 1 1.06 1.06l-5.67 5.67a.75.75 0 0 1-.53.22Z" />
+                  </svg>
+                </span>
+                <span class="extraction-ingestion-button__label">
+                  <i v-for="(character, index) in Array.from('已正式入库')" :key="index" :style="{ '--i': index }">
+                    {{ character }}
+                  </i>
+                </span>
+              </span>
             </button>
           </div>
         </template>
@@ -4790,15 +5231,15 @@ onBeforeUnmount(() => {
 
 .contract-runs-empty-enter-active {
   transition:
-    opacity 0.85s ease,
-    filter 0.9s ease,
-    transform 1s cubic-bezier(0.16, 1, 0.3, 1);
+    opacity 1.4s ease,
+    filter 1.45s ease,
+    transform 1.55s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .contract-runs-empty-enter-from {
   opacity: 0;
-  filter: blur(9px);
-  transform: translateY(12px) scale(0.84);
+  filter: blur(8px);
+  transform: translateY(10px) scale(0.9);
 }
 
 .contract-runs-panel__empty strong,
@@ -6923,6 +7364,7 @@ onBeforeUnmount(() => {
 
 .ingestion-detail {
   position: relative;
+  z-index: 2;
   width: 100%;
   height: 100%;
   padding: 29px 26px 24px;
@@ -6936,13 +7378,218 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(24px) saturate(1.25);
 }
 
+.ingestion-validation-panel {
+  position: absolute;
+  z-index: 1;
+  top: 36px;
+  right: calc(100% - 18px);
+  display: flex;
+  flex-direction: column;
+  width: 310px;
+  max-height: calc(100% - 72px);
+  padding: 20px 30px 20px 20px;
+  overflow: hidden;
+  color: #493b38;
+  background:
+    radial-gradient(circle at 100% 8%, rgb(212 86 78 / 10%), transparent 34%),
+    linear-gradient(145deg, rgb(255 251 249 / 97%), rgb(247 241 238 / 94%));
+  border: 1px solid rgb(255 255 255 / 88%);
+  border-radius: 20px 0 0 20px;
+  box-shadow:
+    -18px 24px 52px rgb(84 42 37 / 19%),
+    inset 0 1px #fff;
+  backdrop-filter: blur(22px) saturate(1.1);
+  transform-origin: right center;
+}
+
+.ingestion-validation-panel > header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px 14px;
+  border-bottom: 1px solid rgb(112 69 61 / 11%);
+}
+
+.ingestion-validation-panel > header div > span {
+  display: block;
+  margin-bottom: 4px;
+  color: #a15b55;
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+}
+
+.ingestion-validation-panel > header strong {
+  display: block;
+  color: #443532;
+  font-size: 15px;
+  font-weight: 790;
+}
+
+.ingestion-validation-panel > header > small {
+  padding: 5px 8px;
+  color: #96605a;
+  font-size: 9px;
+  font-weight: 720;
+  background: rgb(202 91 81 / 8%);
+  border: 1px solid rgb(181 78 69 / 12%);
+  border-radius: 999px;
+}
+
+.ingestion-validation-panel ul {
+  display: grid;
+  gap: 9px;
+  min-height: 0;
+  padding: 12px 1px 2px;
+  margin: 0;
+  overflow: hidden auto;
+  list-style: none;
+}
+
+.ingestion-validation-panel li {
+  border-radius: 12px;
+  transition: opacity 0.3s ease, transform 0.36s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ingestion-validation-panel li.is-resolved {
+  opacity: 0.72;
+}
+
+.ingestion-validation-panel li button {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  width: 100%;
+  padding: 11px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: rgb(255 255 255 / 57%);
+  border: 1px solid rgb(139 74 67 / 10%);
+  border-radius: inherit;
+  box-shadow: inset 0 1px rgb(255 255 255 / 78%);
+  transition: background 0.22s ease, border-color 0.22s ease, transform 0.22s ease;
+}
+
+.ingestion-validation-panel li button:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.ingestion-validation-panel li button:hover:not(:disabled),
+.ingestion-validation-panel li button:focus-visible {
+  background: rgb(255 255 255 / 85%);
+  border-color: rgb(180 80 72 / 20%);
+  outline: none;
+  transform: translateX(-2px);
+}
+
+.ingestion-validation-panel__mark {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: #fff;
+  background: #cf5f58;
+  border: 2px solid rgb(255 255 255 / 86%);
+  border-radius: 50%;
+  box-shadow: 0 4px 9px rgb(159 54 47 / 24%);
+  transition: background 0.38s ease, box-shadow 0.38s ease, transform 0.48s cubic-bezier(0.16, 1.4, 0.3, 1);
+}
+
+.ingestion-validation-panel li.is-resolved .ingestion-validation-panel__mark {
+  background: #4c9a6e;
+  box-shadow: 0 4px 9px rgb(54 132 88 / 22%);
+  transform: rotate(360deg) scale(1.04);
+}
+
+.ingestion-validation-panel__mark svg {
+  width: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.1;
+}
+
+.ingestion-validation-panel__copy {
+  min-width: 0;
+}
+
+.ingestion-validation-panel__copy strong {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: #70433f;
+  font-size: 10.5px;
+  font-weight: 680;
+  line-height: 1.55;
+}
+
+.ingestion-validation-panel li.is-resolved .ingestion-validation-panel__copy strong {
+  color: #50705e;
+}
+
+.ingestion-validation-panel__copy small {
+  display: block;
+  margin-top: 5px;
+  color: #ad6e68;
+  font-size: 8px;
+  font-weight: 680;
+}
+
+.ingestion-validation-panel li.is-resolved .ingestion-validation-panel__copy small {
+  color: #56906e;
+}
+
+.ingestion-validation-panel-enter-active,
+.ingestion-validation-panel-leave-active {
+  transition:
+    opacity 0.3s ease,
+    filter 0.38s ease,
+    transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ingestion-validation-panel-enter-from,
+.ingestion-validation-panel-leave-to {
+  opacity: 0;
+  filter: blur(6px);
+  transform: translateX(54px) scaleX(0.88);
+}
+
+[data-ingestion-target] {
+  scroll-margin-top: 58px;
+}
+
+.extraction-result-file-name.is-issue-focused,
+.extraction-result-section.is-issue-focused,
+.extraction-result-item.is-issue-focused,
+.extraction-result-property.is-issue-focused,
+.clause-review-item-shell.is-issue-focused {
+  position: relative;
+  border-radius: 12px;
+  animation: ingestion-issue-target-pulse 1.45s ease both;
+}
+
+@keyframes ingestion-issue-target-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(207 95 88 / 0%); }
+  28% { box-shadow: 0 0 0 4px rgb(207 95 88 / 28%), 0 0 24px rgb(207 95 88 / 16%); }
+  62% { box-shadow: 0 0 0 2px rgb(207 95 88 / 18%), 0 0 14px rgb(207 95 88 / 10%); }
+}
+
 .ingestion-detail-shell.is-deduplication,
-.ingestion-detail-shell.is-classification {
+.ingestion-detail-shell.is-classification,
+.ingestion-detail-shell.is-detection,
+.ingestion-detail-shell.is-naming {
   width: min(540px, calc(100% - 36px));
 }
 
 .ingestion-detail.is-deduplication,
-.ingestion-detail.is-classification {
+.ingestion-detail.is-classification,
+.ingestion-detail.is-detection,
+.ingestion-detail.is-naming {
   width: 100%;
   padding: 34px 32px 28px;
 }
@@ -7014,26 +7661,26 @@ onBeforeUnmount(() => {
   transform: translateY(12px) scale(0.985);
 }
 
-.ingestion-detail:is(.is-deduplication, .is-classification, .is-result) h3 {
+.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-naming, .is-result) h3 {
   font-size: 25px;
 }
 
-.ingestion-detail:is(.is-deduplication, .is-classification, .is-result) .ingestion-detail__eyebrow {
+.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-naming, .is-result) .ingestion-detail__eyebrow {
   font-size: 10px;
 }
 
-.ingestion-detail:is(.is-deduplication, .is-classification, .is-result) .ingestion-detail__lead {
+.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-naming, .is-result) .ingestion-detail__lead {
   font-size: 12.5px;
   line-height: 1.8;
 }
 
-.ingestion-detail:is(.is-deduplication, .is-classification) .ingestion-detail__status {
+.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-naming) .ingestion-detail__status {
   padding: 15px 17px;
   font-size: 11.5px;
 }
 
-.ingestion-detail.is-classification .ingestion-detail__facts dt,
-.ingestion-detail.is-classification .ingestion-detail__facts dd {
+.ingestion-detail:is(.is-classification, .is-detection, .is-naming) .ingestion-detail__facts dt,
+.ingestion-detail:is(.is-classification, .is-detection, .is-naming) .ingestion-detail__facts dd {
   font-size: 11.5px;
 }
 
@@ -7216,6 +7863,19 @@ onBeforeUnmount(() => {
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.naming-stage-result .classification-stage-result__header {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.naming-stage-result .classification-stage-result__header strong {
+  overflow: visible;
+  font-size: 18px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .classification-stage-result__count {
@@ -7614,6 +8274,45 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.deduplication-candidate__reviewer {
+  display: inline-grid;
+  grid-template-columns: 18px auto minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  max-width: 100%;
+  margin-top: 8px;
+  color: #7b8580;
+  font-size: 9px;
+}
+
+.deduplication-candidate__reviewer svg {
+  width: 18px;
+  height: 18px;
+  padding: 3px;
+  fill: none;
+  stroke: var(--candidate-accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.45;
+  background: var(--candidate-soft);
+  border: 1px solid var(--candidate-border);
+  border-radius: 50%;
+}
+
+.deduplication-candidate__reviewer > span {
+  white-space: nowrap;
+}
+
+.deduplication-candidate__reviewer > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #4e5a54;
+  font-size: 10px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .deduplication-candidate__relation {
   display: inline-flex;
   gap: 5px;
@@ -7896,13 +8595,267 @@ onBeforeUnmount(() => {
   background: #f2f1ed;
 }
 
-.extraction-result-file-name small {
-  color: #8d948f;
-  font-size: 9px;
+.extraction-ingestion-button {
+  --ingestion-action-primary: #ff5569;
+  --ingestion-action-neutral-1: #f7f8f7;
+  --ingestion-action-neutral-2: #e7e7e7;
+
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 200px;
+  height: 68px;
+  padding: 20px;
+  overflow: visible;
+  color: #2d3430;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  text-shadow: 0 1px 1px rgb(0 0 0 / 18%);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 14px;
+  box-shadow:
+    0 0.5px 0.5px 1px rgb(255 255 255 / 20%),
+    0 10px 20px rgb(61 42 9 / 22%),
+    0 4px 5px rgb(0 0 0 / 5%);
+  transition: box-shadow 0.3s ease, opacity 0.3s ease, transform 0.3s ease;
 }
 
-.extraction-ingestion-success {
-  margin-top: 2px;
+.extraction-ingestion-button::after {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  content: '';
+  background:
+    linear-gradient(var(--ingestion-action-neutral-1), var(--ingestion-action-neutral-2)) padding-box,
+    linear-gradient(to bottom, rgb(0 0 0 / 10%), rgb(0 0 0 / 45%)) border-box;
+  border: 2.5px solid transparent;
+  border-radius: inherit;
+  transition: box-shadow 0.4s ease, transform 0.4s ease;
+}
+
+.extraction-ingestion-button::before {
+  position: absolute;
+  z-index: 2;
+  inset: 7px 6px 6px;
+  content: '';
+  background: linear-gradient(to top, var(--ingestion-action-neutral-1), var(--ingestion-action-neutral-2));
+  border-radius: 10px;
+  filter: blur(0.5px);
+}
+
+.extraction-ingestion-button:hover:not(:disabled) {
+  box-shadow:
+    0 0 1px 2px rgb(255 255 255 / 30%),
+    0 15px 30px rgb(56 37 7 / 30%),
+    0 10px 3px -3px rgb(0 0 0 / 4%);
+  transform: scale(1.02);
+}
+
+.extraction-ingestion-button:hover:not(:disabled)::after {
+  box-shadow: inset 0 -1px 3px #fff;
+  transform: scale(1.025, 1.08);
+}
+
+.extraction-ingestion-button:active:not(:disabled) {
+  box-shadow:
+    0 0 1px 2px rgb(255 255 255 / 30%),
+    0 10px 3px -3px rgb(0 0 0 / 20%);
+  transform: scale(1);
+}
+
+.extraction-ingestion-button:focus-visible {
+  outline: 3px solid rgb(255 85 105 / 32%);
+  outline-offset: 4px;
+}
+
+.extraction-ingestion-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.extraction-ingestion-button.is-submitting:disabled,
+.extraction-ingestion-button.is-sent:disabled {
+  opacity: 1;
+}
+
+.extraction-ingestion-button__outline {
+  position: absolute;
+  z-index: 1;
+  inset: -2px -3.5px;
+  overflow: hidden;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.extraction-ingestion-button__outline::before {
+  position: absolute;
+  inset: -100%;
+  content: '';
+  background: conic-gradient(from 180deg, transparent 60%, white 80%, transparent 100%);
+  animation: extraction-ingestion-outline-spin 2s linear infinite paused;
+}
+
+.extraction-ingestion-button:hover:not(:disabled) .extraction-ingestion-button__outline {
+  opacity: 1;
+}
+
+.extraction-ingestion-button:hover:not(:disabled) .extraction-ingestion-button__outline::before {
+  animation-play-state: running;
+}
+
+.extraction-ingestion-button__state {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding-left: 31px;
+}
+
+.extraction-ingestion-button__state.is-sent {
+  display: none;
+}
+
+.extraction-ingestion-button__icon {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: auto;
+  transform: scale(1.25);
+  transition: transform 0.3s ease;
+}
+
+.extraction-ingestion-button__icon svg {
+  width: 1em;
+  overflow: visible;
+  fill: currentColor;
+  filter: drop-shadow(0 1px 0.6px rgb(0 0 0 / 50%));
+}
+
+.extraction-ingestion-button__state.is-default .extraction-ingestion-button__icon svg {
+  animation: extraction-ingestion-plane-land 0.6s ease forwards;
+}
+
+.extraction-ingestion-button:hover:not(:disabled) .is-default .extraction-ingestion-button__icon {
+  transform: rotate(45deg) scale(1.25);
+}
+
+.extraction-ingestion-button__state.is-default .extraction-ingestion-button__icon::before {
+  position: absolute;
+  top: 50%;
+  left: -5px;
+  width: 0;
+  height: 2px;
+  content: '';
+  background: linear-gradient(to right, transparent, rgb(0 0 0 / 50%));
+}
+
+.extraction-ingestion-button__label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.extraction-ingestion-button__label i {
+  display: block;
+  font-style: normal;
+  opacity: 0;
+  animation: extraction-ingestion-letter-in 0.8s ease forwards calc(var(--i) * 0.03s);
+}
+
+.extraction-ingestion-button:hover:not(:disabled) .is-default .extraction-ingestion-button__label i {
+  animation: extraction-ingestion-letter-wave 0.5s ease forwards calc(var(--i) * 0.02s);
+}
+
+.extraction-ingestion-button.is-submitting .is-default .extraction-ingestion-button__label i {
+  animation: extraction-ingestion-letter-out 0.6s ease forwards calc(var(--i) * 0.03s);
+}
+
+.extraction-ingestion-button.is-submitting .is-default .extraction-ingestion-button__icon {
+  transform: rotate(0) scale(1.25);
+}
+
+.extraction-ingestion-button.is-submitting .is-default .extraction-ingestion-button__icon svg {
+  animation: extraction-ingestion-plane-takeoff 0.8s linear forwards;
+}
+
+.extraction-ingestion-button.is-submitting .is-default .extraction-ingestion-button__icon::before {
+  animation: extraction-ingestion-contrail 0.8s linear forwards;
+}
+
+.extraction-ingestion-button.is-sent .extraction-ingestion-button__state.is-default {
+  display: none;
+}
+
+.extraction-ingestion-button.is-sent .extraction-ingestion-button__state.is-sent {
+  display: flex;
+}
+
+.extraction-ingestion-button.is-sent .is-sent .extraction-ingestion-button__icon svg {
+  opacity: 0;
+  animation: extraction-ingestion-success-icon 1.2s ease forwards 0.35s;
+}
+
+.extraction-ingestion-button.is-sent .is-sent .extraction-ingestion-button__label i {
+  animation-delay: calc(var(--i) * 0.12s);
+}
+
+@keyframes extraction-ingestion-outline-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes extraction-ingestion-letter-in {
+  0% { color: var(--ingestion-action-primary); opacity: 0; filter: blur(5px); transform: translate(5px, -20px) rotate(-90deg); }
+  30% { opacity: 1; filter: blur(0); transform: translateY(4px); }
+  50% { opacity: 1; transform: translateY(-3px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes extraction-ingestion-letter-wave {
+  30% { opacity: 1; transform: translateY(4px); }
+  50% { color: var(--ingestion-action-primary); opacity: 1; transform: translateY(-3px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes extraction-ingestion-letter-out {
+  from { opacity: 1; }
+  to { color: var(--ingestion-action-primary); opacity: 0; filter: blur(5px); transform: translate(5px, 20px); }
+}
+
+@keyframes extraction-ingestion-plane-land {
+  from { opacity: 0; filter: blur(3px); transform: translate(-60px, 30px) rotate(-50deg) scale(2); }
+  to { opacity: 1; filter: blur(0); transform: translate(0) rotate(0) scale(1); }
+}
+
+@keyframes extraction-ingestion-plane-takeoff {
+  0%, 60% { opacity: 1; }
+  60% { transform: translateX(70px) rotate(45deg) scale(2); }
+  100% { opacity: 0; transform: translateX(160px) rotate(45deg) scale(0); }
+}
+
+@keyframes extraction-ingestion-contrail {
+  0% { width: 0; opacity: 1; }
+  8% { width: 15px; }
+  60% { width: 80px; opacity: 0.7; }
+  100% { width: 160px; opacity: 0; }
+}
+
+@keyframes extraction-ingestion-success-icon {
+  0% { color: var(--ingestion-action-primary); opacity: 0; filter: blur(4px); transform: scale(4) rotate(-40deg); }
+  30% { opacity: 1; filter: blur(1px); transform: scale(0.6); }
+  50% { opacity: 1; filter: blur(0); transform: scale(1.2); }
+  100% { opacity: 1; transform: scale(1); }
 }
 
 .extraction-result-item {
@@ -8907,6 +9860,7 @@ onBeforeUnmount(() => {
   color: #5b431c;
 }
 
+.ingestion-detail.is-result .extraction-result-file-name input,
 .ingestion-detail.is-result .extraction-result-object input,
 .ingestion-detail.is-result .extraction-result-object select,
 .ingestion-detail.is-result .extraction-result-boolean-control__trigger,
@@ -8937,6 +9891,7 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
+.ingestion-detail.is-result .extraction-result-file-name input::placeholder,
 .ingestion-detail.is-result .extraction-result-object input::placeholder,
 .ingestion-detail.is-result .extraction-result-item textarea::placeholder {
   color: rgb(255 240 187 / 55%);
@@ -9029,6 +9984,7 @@ onBeforeUnmount(() => {
     inset 3px 3px 7px rgb(60 31 1 / 52%);
 }
 
+.ingestion-detail.is-result .extraction-result-file-name input:focus,
 .ingestion-detail.is-result .extraction-result-object input:focus,
 .ingestion-detail.is-result .extraction-result-object select:focus,
 .ingestion-detail.is-result .extraction-result-item textarea:focus {
@@ -9040,6 +9996,13 @@ onBeforeUnmount(() => {
     -3px -3px 7px rgb(255 231 140 / 31%),
     inset 4px 4px 8px rgb(78 43 3 / 34%),
     inset -3px -3px 7px rgb(255 225 126 / 28%);
+}
+
+.ingestion-detail.is-result .extraction-result-file-name input:disabled {
+  color: rgb(255 240 187 / 62%);
+  cursor: not-allowed;
+  filter: saturate(0.7);
+  opacity: 0.72;
 }
 
 .ingestion-detail.is-result .extraction-result-object .extraction-result-property.is-required-empty > input,
@@ -9479,6 +10442,17 @@ onBeforeUnmount(() => {
   82%, 100% { transform: translateX(220%); }
 }
 
+@media (max-width: 1050px) {
+  .ingestion-validation-panel {
+    z-index: 3;
+    right: auto;
+    left: 18px;
+    width: min(310px, calc(100% - 36px));
+    padding-right: 20px;
+    border-radius: 18px;
+  }
+}
+
 @media (max-height: 790px) {
   .workflow-canvas {
     height: 590px;
@@ -9488,6 +10462,61 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .ingestion-validation-panel,
+  .ingestion-validation-panel li,
+  .ingestion-validation-panel li button,
+  .ingestion-validation-panel__mark {
+    transition: none;
+  }
+
+  .ingestion-validation-panel li.is-resolved .ingestion-validation-panel__mark {
+    transform: none;
+  }
+
+  .extraction-result-file-name.is-issue-focused,
+  .extraction-result-section.is-issue-focused,
+  .extraction-result-item.is-issue-focused,
+  .extraction-result-property.is-issue-focused,
+  .clause-review-item-shell.is-issue-focused {
+    animation: none;
+    box-shadow: 0 0 0 3px rgb(207 95 88 / 24%);
+  }
+
+  .extraction-ingestion-button,
+  .extraction-ingestion-button::after,
+  .extraction-ingestion-button__outline,
+  .extraction-ingestion-button__icon {
+    transition: none;
+  }
+
+  .extraction-ingestion-button:hover:not(:disabled),
+  .extraction-ingestion-button:hover:not(:disabled)::after,
+  .extraction-ingestion-button:hover:not(:disabled) .is-default .extraction-ingestion-button__icon {
+    transform: none;
+  }
+
+  .extraction-ingestion-button__outline::before,
+  .extraction-ingestion-button__label i,
+  .extraction-ingestion-button__state.is-default .extraction-ingestion-button__icon svg,
+  .extraction-ingestion-button.is-submitting .is-default .extraction-ingestion-button__icon svg,
+  .extraction-ingestion-button.is-submitting .is-default .extraction-ingestion-button__icon::before,
+  .extraction-ingestion-button.is-sent .is-sent .extraction-ingestion-button__icon svg {
+    animation: none;
+  }
+
+  .extraction-ingestion-button__label i,
+  .extraction-ingestion-button.is-submitting .is-default .extraction-ingestion-button__label i,
+  .extraction-ingestion-button.is-sent .is-sent .extraction-ingestion-button__icon svg {
+    color: inherit;
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+
+  .extraction-ingestion-button.is-submitting .is-default .extraction-ingestion-button__icon::before {
+    display: none;
+  }
+
   .contract-runs-empty-enter-active {
     transition: none;
   }

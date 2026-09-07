@@ -1,0 +1,123 @@
+<section id="contract-library-concept" aria-label="合同库筛选样稿">
+  <style>
+    #contract-library-concept{--cl-bg:light-dark(#f4f6f4,#1c2420);--cl-paper:light-dark(#fcfdfb,#26312b);--cl-text:light-dark(#263e32,#e0e9e3);--cl-muted:light-dark(#66776d,#a7b9ac);--cl-line:light-dark(#dce4dd,#405046);--cl-accent:light-dark(#375c48,#b5d0ba);--cl-selected:light-dark(#e3ece3,#364e3d);color:var(--cl-text);background:var(--cl-bg);font-family:Inter,'PingFang SC','Microsoft YaHei',sans-serif;font-size:14px;line-height:1.55;padding:28px;border-radius:20px;box-sizing:border-box}
+    #contract-library-concept *{box-sizing:border-box}
+    #contract-library-concept button,#contract-library-concept select{font:inherit;color:inherit;cursor:pointer}
+    #contract-library-concept button{border:0;background:transparent}
+    #contract-library-concept .cl-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:26px}
+    #contract-library-concept h2{font-size:23px;font-weight:500;letter-spacing:2px;margin:0}
+    #contract-library-concept .cl-sub{color:var(--cl-muted);font-size:12px}
+    #contract-library-concept .cl-sample{border:1px solid var(--cl-line);padding:3px 9px;border-radius:6px;white-space:nowrap;font-size:12px;color:var(--cl-muted)}
+    #contract-library-concept .cl-types{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:23px}
+    #contract-library-concept .cl-type{position:relative;text-align:left;padding:16px 14px 12px;border:1px solid var(--cl-line);border-radius:4px 13px 13px 13px;background:var(--cl-paper);min-width:0;transition:background .18s,border-color .18s}
+    #contract-library-concept .cl-type:before{content:'';position:absolute;left:-1px;top:-6px;width:36%;height:6px;border:1px solid var(--cl-line);border-bottom:0;border-radius:5px 6px 0 0;background:var(--cl-paper)}
+    #contract-library-concept .cl-type[aria-pressed=true],#contract-library-concept .cl-type[aria-pressed=true]:before{background:var(--cl-selected);border-color:var(--cl-accent)}
+    #contract-library-concept .cl-type[aria-pressed=true]{box-shadow:inset 0 -2px var(--cl-accent)}
+    #contract-library-concept .cl-type-top{display:flex;justify-content:space-between;align-items:center;color:var(--cl-muted);margin-bottom:8px}
+    #contract-library-concept .cl-type-label{display:block;font-weight:500;white-space:nowrap}
+    #contract-library-concept .cl-time{padding:17px 0;border-top:1px solid var(--cl-line);border-bottom:1px solid var(--cl-line)}
+    #contract-library-concept .cl-time-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+    #contract-library-concept .cl-year-label{display:flex;align-items:center;gap:10px;color:var(--cl-muted);font-size:12px}
+    #contract-library-concept select{background:var(--cl-paper);border:1px solid var(--cl-line);border-radius:7px;padding:5px 25px 5px 10px;font-size:14px;color:var(--cl-text)}
+    #contract-library-concept .cl-undated{font-size:12px;padding:5px 8px;border-radius:6px;color:var(--cl-muted)}
+    #contract-library-concept .cl-months{display:flex;flex-wrap:wrap;gap:3px}
+    #contract-library-concept .cl-months button{padding:5px 7px;border-radius:6px;color:var(--cl-muted);font-size:12px;min-width:36px}
+    #contract-library-concept .cl-months button[aria-pressed=true],#contract-library-concept .cl-undated[aria-pressed=true]{background:var(--cl-accent);color:var(--cl-bg)}
+    #contract-library-concept .cl-months button:hover,#contract-library-concept .cl-undated:hover{box-shadow:inset 0 0 0 1px var(--cl-accent)}
+    #contract-library-concept .cl-results-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:22px 0 10px}
+    #contract-library-concept .cl-breadcrumb{font-size:13px;font-weight:500}
+    #contract-library-concept .cl-results-count{font-size:12px;color:var(--cl-muted)}
+    #contract-library-concept .cl-group-label{display:flex;align-items:center;gap:10px;margin:20px 0 10px;color:var(--cl-muted);font-size:12px}
+    #contract-library-concept .cl-group-label:after{content:'';height:1px;background:var(--cl-line);flex:1}
+    #contract-library-concept .cl-items{display:grid;gap:8px}
+    #contract-library-concept .cl-item{display:grid;grid-template-columns:36px minmax(0,1fr) auto;align-items:center;gap:13px;padding:14px 16px;background:var(--cl-paper);border:1px solid var(--cl-line);border-radius:10px}
+    #contract-library-concept .cl-doc{display:grid;place-items:center;width:34px;height:42px;background:var(--cl-selected);border:1px solid var(--cl-line);border-radius:4px 9px 4px 4px;color:var(--cl-accent);font-size:10px;letter-spacing:.4px}
+    #contract-library-concept .cl-name{font-size:14px;font-weight:500;overflow-wrap:anywhere;margin:0 0 3px}
+    #contract-library-concept .cl-meta{font-size:12px;color:var(--cl-muted);overflow-wrap:anywhere}
+    #contract-library-concept .cl-date{font-size:12px;color:var(--cl-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+    #contract-library-concept .cl-empty{text-align:center;padding:45px 12px;color:var(--cl-muted)}
+    #contract-library-concept[data-layout=cards] .cl-items{grid-template-columns:repeat(2,minmax(0,1fr))}
+    #contract-library-concept[data-layout=cards] .cl-item{grid-template-columns:34px minmax(0,1fr);align-items:start}
+    #contract-library-concept[data-layout=cards] .cl-date{grid-column:2}
+    #contract-library-concept[data-density=compact] .cl-item{padding:9px 12px}
+    @media(max-width:540px){#contract-library-concept{padding:18px 14px}#contract-library-concept .cl-types{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 10px}#contract-library-concept .cl-header{margin-bottom:25px}#contract-library-concept .cl-item{grid-template-columns:32px minmax(0,1fr);gap:10px;padding:12px}#contract-library-concept .cl-date{grid-column:2}#contract-library-concept[data-layout=cards] .cl-items{grid-template-columns:1fr}#contract-library-concept .cl-results-head{align-items:flex-start}#contract-library-concept .cl-results-count{white-space:nowrap}#contract-library-concept .cl-doc{width:30px}}
+    @media(pointer:coarse){#contract-library-concept .cl-months button,#contract-library-concept .cl-undated,#contract-library-concept select{min-height:44px;min-width:44px}}
+    @media(prefers-reduced-motion:reduce){#contract-library-concept *{transition:none!important}}
+  </style>
+  <header class="cl-header"><div><h2>合同档案</h2><div class="cl-sub">按类型收纳，沿时间查找</div></div><span class="cl-sample">交互样稿 · 示例数据</span></header>
+  <div class="cl-types" role="group" aria-label="合同类型"></div>
+  <div class="cl-time">
+    <div class="cl-time-top"><label class="cl-year-label">签订时间<select aria-label="签订年份"><option value="all">全部年份</option><option value="2026" selected>2026 年</option><option value="2025">2025 年</option></select></label><button type="button" class="cl-undated" aria-pressed="false">日期未识别</button></div>
+    <div class="cl-months" role="group" aria-label="签订月份"></div>
+  </div>
+  <div class="cl-results-head" aria-live="polite"><span class="cl-breadcrumb"></span><span class="cl-results-count"></span></div>
+  <div class="cl-results"></div>
+  <script>
+    (()=>{
+      const root=document.getElementById('contract-library-concept');
+      const records=[
+        {name:'光伏组件采购合同.pdf',type:'采购合同',date:'2026-09-06',party:'示例光能有限公司'},
+        {name:'生产设备采购合同.pdf',type:'采购合同',date:'2026-09-02',party:'示例装备有限公司'},
+        {name:'分布式电站销售合同.pdf',type:'销售合同',date:'2026-09-01',party:'示例能源有限公司'},
+        {name:'园区运维服务合同.pdf',type:'服务合同',date:'2026-08-26',party:'示例运营有限公司'},
+        {name:'逆变器采购合同.pdf',type:'采购合同',date:'2026-08-18',party:'示例电气有限公司'},
+        {name:'储能系统销售合同.pdf',type:'销售合同',date:'2026-08-10',party:'示例科技有限公司'},
+        {name:'技术咨询服务合同.pdf',type:'服务合同',date:'2026-06-15',party:'示例咨询有限公司'},
+        {name:'电缆采购合同.pdf',type:'采购合同',date:'2026-03-12',party:'示例线缆有限公司'},
+        {name:'年度组件采购合同.pdf',type:'采购合同',date:'2025-12-20',party:'示例制造有限公司'},
+        {name:'年度销售框架协议.pdf',type:'销售合同',date:'2025-11-08',party:'示例贸易有限公司'},
+        {name:'设备维保服务合同.pdf',type:'服务合同',date:null,party:'示例维保有限公司'},
+        {name:'支架采购补充协议.pdf',type:'采购合同',date:null,party:'示例材料有限公司'}
+      ];
+      const state={type:'全部合同',year:'2026',month:'all',undated:false,layout:'list',density:'comfortable'};
+      const types=['全部合同','采购合同','销售合同','服务合同'];
+      const typeBox=root.querySelector('.cl-types');
+      const monthBox=root.querySelector('.cl-months');
+      const yearSelect=root.querySelector('select');
+      const undatedButton=root.querySelector('.cl-undated');
+      const typeMatches=r=>state.type==='全部合同'||r.type===state.type;
+      types.forEach((type,index)=>{
+        const button=document.createElement('button');button.type='button';button.className='cl-type';button.dataset.type=type;
+        const count=records.filter(r=>type==='全部合同'||r.type===type).length;
+        button.innerHTML=`<span class="cl-type-top"><span>0${index+1}</span><span>${count} 份</span></span><span class="cl-type-label">${type}</span>`;
+        button.addEventListener('click',()=>{state.type=type;render()});typeBox.append(button);
+      });
+      ['all',...Array.from({length:12},(_,i)=>String(i+1))].forEach(month=>{
+        const button=document.createElement('button');button.type='button';button.dataset.month=month;button.textContent=month==='all'?'全部月份':`${month}月`;
+        button.addEventListener('click',()=>{state.month=month;state.undated=false;render()});monthBox.append(button);
+      });
+      yearSelect.addEventListener('change',()=>{state.year=yearSelect.value;state.undated=false;render()});
+      undatedButton.addEventListener('click',()=>{state.undated=!state.undated;render()});
+      function render(){
+        root.dataset.layout=state.layout;root.dataset.density=state.density;
+        typeBox.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.type===state.type)));
+        monthBox.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(!state.undated&&b.dataset.month===state.month)));
+        const unknownCount=records.filter(r=>typeMatches(r)&&!r.date).length;
+        undatedButton.textContent=`日期未识别 · ${unknownCount}`;undatedButton.setAttribute('aria-pressed',String(state.undated));
+        yearSelect.disabled=state.undated;
+        const filtered=records.filter(r=>{
+          if(!typeMatches(r))return false;
+          if(state.undated)return !r.date;
+          if(!r.date)return state.year==='all'&&state.month==='all';
+          return (state.year==='all'||r.date.startsWith(state.year))&&(state.month==='all'||Number(r.date.slice(5,7))===Number(state.month));
+        }).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+        const time=state.undated?'日期未识别':`${state.year==='all'?'全部年份':state.year+' 年'}${state.month==='all'?'':' · '+state.month+' 月'}`;
+        root.querySelector('.cl-breadcrumb').textContent=`${state.type} / ${time}`;
+        root.querySelector('.cl-results-count').textContent=`${filtered.length} 份合同`;
+        const result=root.querySelector('.cl-results');result.replaceChildren();
+        if(!filtered.length){const empty=document.createElement('div');empty.className='cl-empty';empty.textContent='该分类与时间下暂无合同';result.append(empty);return}
+        const groups=new Map();filtered.forEach(r=>{const key=r.date?r.date.slice(0,7):'unknown';if(!groups.has(key))groups.set(key,[]);groups.get(key).push(r)});
+        groups.forEach((items,key)=>{
+          const section=document.createElement('section');const heading=document.createElement('div');heading.className='cl-group-label';
+          heading.textContent=key==='unknown'?`日期未识别 · ${items.length} 份`:`${key.slice(0,4)} 年 ${Number(key.slice(5))} 月 · ${items.length} 份`;
+          const list=document.createElement('div');list.className='cl-items';
+          items.forEach(r=>{const item=document.createElement('article');item.className='cl-item';
+            item.innerHTML=`<span class="cl-doc" aria-hidden="true">PDF</span><div><h3 class="cl-name">${r.name}</h3><div class="cl-meta">${r.type} · ${r.party}</div></div><span class="cl-date">${r.date||'待补充日期'}</span>`;list.append(item)});
+          section.append(heading,list);result.append(section);
+        });
+      }
+      render();
+      if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:render});tweak.addSelect(state,'layout',{label:'合同展示',options:[{label:'紧凑列表',value:'list'},{label:'双列卡片',value:'cards'}]});tweak.addSelect(state,'density',{label:'信息密度',options:[{label:'舒展',value:'comfortable'},{label:'紧凑',value:'compact'}]});}
+    })();
+  </script>
+</section>
