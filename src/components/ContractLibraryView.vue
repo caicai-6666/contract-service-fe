@@ -12,143 +12,47 @@ import {
 import HandwritingPrompt from './HandwritingPrompt.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
 import ContractArchivePanel from './ContractArchivePanel.vue'
+import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
+import DeleteConversationDialog from './DeleteConversationDialog.vue'
+import { getSelectedFileKind, convertImageFileToPdf } from '../services/local-file-pdf.js'
+import { createCommunicationSession, newConversation } from '../services/communicationSession.js'
+import { createMessageScrollFollower } from '../services/messageScrollFollower.js'
+import { createHistoryPullRefresh } from '../services/historyPullRefresh.js'
+import { validateTurnInput, turnTimingLabel, hasStartedFinal, shouldCollapseTurnProcess, copyableTurnMessage } from '../models/communicationTurn.js'
 defineOptions({ name: 'ContractLibraryView' })
 const props = defineProps({ active: { type: Boolean, default: true } })
 
-let conversationId = 4
-
-const conversations = ref([
-  {
-    id: 1,
-    name: '新对话',
-    messages: [],
-    replying: false,
-  },
-  {
-    id: 2,
-    name: 'Markdown 效果预览',
-    messages: [
-      {
-        id: 2,
-        role: 'user',
-        content: [
-          '请审查这份《软件服务合同》，重点关注：',
-          '',
-          '- **付款条件**是否清晰',
-          '- 违约责任是否对等',
-          '- 数据安全条款是否完整',
-        ].join('\n'),
-      },
-      {
-        id: 3,
-        role: 'assistant',
-        processingTime: '处理了 8 秒',
-        processPath: [
-          '读取合同审查请求与关注事项',
-          '归纳付款、责任与数据安全风险',
-          '生成结构化风险清单与修改建议',
-        ],
-        createdAt: '10:24',
-        content: [
-          '# 合同审查报告',
-          '',
-          '> 本报告为 Markdown 渲染效果示例，不构成正式法律意见。',
-          '',
-          '## 一、审查结论',
-          '',
-          '合同整体结构完整，但存在 **2 项高风险**、*2 项一般风险*。建议优先处理付款条件与数据泄露责任，~~无需修改的旧结论~~ 已在本次复核中更新。',
-          '',
-          '---',
-          '',
-          '## 二、风险清单',
-          '',
-          '| 风险等级 | 条款 | 发现 | 建议 |',
-          '| :--- | :--- | :--- | :--- |',
-          '| 高 | 第 4.2 条 | 验收期限未明确 | 补充 `5 个工作日` 的验收期限 |',
-          '| 高 | 第 8.3 条 | 数据泄露责任上限过低 | 单独约定赔偿上限 |',
-          '| 中 | 第 6.1 条 | 续费规则表述模糊 | 明确书面确认流程 |',
-          '',
-          '## 三、建议修改顺序',
-          '',
-          '1. **先处理高风险条款**',
-          '   - 明确验收起算时间',
-          '   - 补充逾期未反馈的处理方式',
-          '2. **再核对责任边界**',
-          '   - 数据安全责任',
-          '   - 第三方索赔责任',
-          '3. 完成商务条款复核',
-          '',
-          '## 四、推荐条款示例',
-          '',
-          '```text',
-          '甲方应在收到验收申请后 5 个工作日内完成验收。',
-          '逾期未提出书面异议的，视为验收通过。',
-          '```',
-          '',
-          '结构化结果也可以用代码块展示：',
-          '',
-          '```json',
-          '{',
-          '  "contractId": "HT-2026-001",',
-          '  "riskLevel": "high",',
-          '  "riskCount": 4',
-          '}',
-          '```',
-          '',
-          '## 五、后续操作',
-          '',
-          '可参考[合同审查说明](https://example.com/contract-review)，或继续询问某一条款的修改方案。',
-        ].join('\n'),
-      },
-    ],
-    replying: false,
-  },
-  {
-    id: 3,
-    name: '履约节点梳理',
-    messages: [
-      { id: 4, role: 'user', content: '整理这份合同的关键履约节点。' },
-      {
-        id: 5,
-        role: 'assistant',
-        processingTime: '处理了 3 秒',
-        processPath: ['识别履约相关条款', '按时间顺序归纳关键节点'],
-        createdAt: '09:42',
-        content: '接入合同后，我会提取交付、验收、付款与续约等关键时间节点。',
-      },
-    ],
-    replying: false,
-  },
-  {
-    id: 4,
-    name: '合同归档查询',
-    messages: [
-      { id: 6, role: 'user', content: '查询最近归档的合同。' },
-      {
-        id: 7,
-        role: 'assistant',
-        processingTime: '处理了 2 秒',
-        processPath: ['解析归档查询条件', '准备匹配归档记录'],
-        createdAt: '昨天 16:18',
-        content: '合同库接入后，我会在这里展示匹配的归档记录。',
-      },
-    ],
-    replying: false,
-  },
-])
+const communication = createCommunicationSession()
+const { conversations, restoring, listLoading, listError } = communication
 const prompt = ref('')
 const messageListRef = ref(null)
+const messageContentRef = ref(null)
+let messageScrollFollower = null
+let disposeHistoryPull = null
+const historyPullDistance = ref(0)
+const conversationVisible = ref(false)
+let revealRevision = 0
 const agentBodyRef = ref(null)
 const composerInputRef = ref(null)
 const attachmentInputRef = ref(null)
 const selectedAttachments = ref([])
-const activeConversation = ref(0)
+const convertingAttachments = ref(false)
+const attachmentNotices = ref([])
+const attachmentSourceKeys = new WeakMap()
+const attachmentNoticeTimers = new Map()
+let attachmentNoticeId = 0
+let attachmentSelectionDisposed = false
+const attachmentPreviewFile = ref(null)
+const attachmentPreviewUrl = ref('')
+const attachmentPreviewError = ref('')
+const activeConversation = computed({
+  get: () => Math.max(0, conversations.value.findIndex((c) => c.id === communication.selectedConversationId.value)),
+  set: (index) => { communication.selectedConversationId.value = conversations.value[index]?.id },
+})
 const historyMenuOpen = ref(false)
 const previewQuestion = ref(null)
 const previewTop = ref(0)
-const anchoredQuestionId = ref(null)
 const initialMessageId = ref(null)
-const initialReplyConversationIds = ref(new Set())
 const enteringMessageIds = ref(new Set())
 const expandedProcessIds = ref(new Set())
 const copiedMessageId = ref(null)
@@ -158,32 +62,119 @@ const chatPanelWidth = ref(null)
 const displayedChatPanelWidth = ref(0)
 const resizeBounds = ref({ min: 360, max: 360 })
 const resizingChatPanel = ref(false)
+const stackedPanels = ref(false)
+let libraryResizeObserver = null
 const editingConversationId = ref(null)
 const conversationNameDraft = ref('')
 const conversationNameInputRef = ref(null)
+const conversationToDelete = ref(null)
+const conversationDeleteError = ref('')
 
-const messages = computed(() => conversations.value[activeConversation.value].messages)
+const currentConversation = computed(() => conversations.value[activeConversation.value] || conversations.value[0])
+const messages = computed(() => currentConversation.value.messages)
 const replying = computed(() => conversations.value[activeConversation.value]?.replying ?? false)
+const currentTurn = computed(() => {
+  const turn = currentConversation.value.turns.at(-1)
+  return messages.value.some((message) => message.fromHistory && message.turnId === turn?.turn_id) ? undefined : turn
+})
+const displayTurns = computed(() => {
+  const archived = new Set(messages.value.filter((message) => message.fromHistory).map((message) => message.turnId))
+  return [...(currentConversation.value.history?.turns ?? []).filter((turn) => archived.has(turn.turn_id)), ...currentConversation.value.turns.filter((turn) => !archived.has(turn.turn_id))]
+})
+const messageDisplayStates = ref(new Map())
+function updateMessageDisplay(messageId, state) {
+  messageDisplayStates.value.set(messageId, state)
+}
+function canCopyMessage(message) {
+  const state = messageDisplayStates.value.get(message.id)
+  if (!state?.complete) return false
+  const turn = displayTurns.value.find((item) => item.turn_id === message.turnId)
+  const last = copyableTurnMessage(turn, state.text)
+  return Boolean(last && message.id === `${turn.turn_id}:${last.message_id}`)
+}
+const expandedTurnProcesses = ref(new Set())
+const startedFinalTurns = computed(() => new Set(displayTurns.value.filter(hasStartedFinal).map((turn) => turn.turn_id)))
+const collapsedProcessTurns = computed(() => new Set(displayTurns.value.filter(shouldCollapseTurnProcess).map((turn) => turn.turn_id)))
+const processToggleTurns = computed(() => new Set(messages.value
+  .filter((message) => message.messageKind === 'intermediate' && collapsedProcessTurns.value.has(message.turnId))
+  .map((message) => message.turnId)))
+
+const messageSections = computed(() => {
+  const sections = []
+  for (const message of messages.value) {
+    const process = message.messageKind === 'intermediate'
+    const previous = sections.at(-1)
+    if (process && previous?.process && previous.turnId === message.turnId) previous.messages.push(message)
+    else sections.push({ id: message.id, turnId: message.turnId, process, messages: [message] })
+  }
+  return sections
+})
+
+function processIsCollapsed(section) {
+  return section.process && collapsedProcessTurns.value.has(section.turnId) && !expandedTurnProcesses.value.has(section.turnId)
+}
+
+watch(() => displayTurns.value.filter((turn) => turn.status === 'cancelled').map((turn) => turn.turn_id), (ids, previous = []) => {
+  const newlyStopped = ids.filter((id) => !previous.includes(id))
+  if (!newlyStopped.length) return
+  const expanded = new Set(expandedTurnProcesses.value)
+  newlyStopped.forEach((id) => expanded.delete(id))
+  expandedTurnProcesses.value = expanded
+  // 停止后的收尾和折叠不再追到空白末尾，保留当前阅读位置。
+  messageScrollFollower?.pause()
+})
+
+function toggleTurnProcess(turnId) {
+  messageScrollFollower?.holdLayout()
+  const expanded = new Set(expandedTurnProcesses.value)
+  if (expanded.has(turnId)) expanded.delete(turnId)
+  else expanded.add(turnId)
+  expandedTurnProcesses.value = expanded
+}
+
+const tailActivity = computed(() => {
+  if (currentConversation.value.submitting) return { text: '正在思考', thinking: true }
+  if (!replying.value || ['recovering', 'disconnected'].includes(currentTurn.value?.connection)) return null
+  if (hasStartedFinal(currentTurn.value)) return null
+  const progress = currentTurn.value?.active_progress?.message
+  if (progress) return { text: progress, thinking: false }
+  if (!messages.value.some((message) => message.status === 'streaming')) return { text: '正在思考', thinking: true }
+  return null
+})
+const processingClock = ref(Date.now())
+let processingTimer = null
+watch(
+  () => [props.active, currentTurn.value?.turn_id, currentTurn.value?.status, currentTurn.value?.activated_at],
+  () => {
+    window.clearInterval(processingTimer)
+    processingTimer = null
+    processingClock.value = Date.now()
+    if (props.active && currentTurn.value?.status === 'processing' && currentTurn.value.activated_at) {
+      processingTimer = window.setInterval(() => { processingClock.value = Date.now() }, 1000)
+    }
+  },
+  { immediate: true },
+)
+
+function messageTimingLabel(message) {
+  const turn = displayTurns.value.find((item) => item.turn_id === message.turnId)
+  if (turn?.history && turn.processing_duration_ms === null && turn.status === 'cancelled') return '已手动停止'
+  return turnTimingLabel(turn, processingClock.value)
+}
+const composerBusy = computed(() => !conversationVisible.value || convertingAttachments.value || currentConversation.value.submitting || currentConversation.value.cancelling || currentConversation.value.deleting || currentConversation.value.renaming)
+const stopMode = computed(() => replying.value && !prompt.value.trim() && !selectedAttachments.value.length)
+const turnLabels = { pending_activation: '正在连接', processing: '正在处理', completed: '已完成', cancelled: '已终止', superseded: '已被新问题替代', rejected: '本轮未通过检查', failed: '本轮处理失败', expired: '轮次激活已超时，请重新发送' }
 const historyItems = computed(() => conversations.value.map((conversation) => conversation.name))
 const questionMessages = computed(() => messages.value.filter((message) => message.role === 'user'))
-const isInitialReplyPending = computed(() => {
-  const conversationIdValue = conversations.value[activeConversation.value]?.id
-  return initialReplyConversationIds.value.has(conversationIdValue)
-})
 
 const HISTORY_VISIBILITY_THRESHOLD = 3
 const CONVERSATION_TITLE_MAX_LENGTH = 12
-const INITIAL_REPLY_DELAY = 1400
-const FOLLOW_UP_REPLY_DELAY = 650
 const CHAT_PANEL_MIN_WIDTH = 360
-const CABINET_PANEL_MIN_WIDTH = 480
+const CABINET_PANEL_MIN_WIDTH = 640
 const RESIZE_KEYBOARD_STEP = 24
 
 const messageElements = new Map()
 const messageEntryTimers = new Map()
-const replyTimers = new Map()
-
-let messageId = 7
 let composerResizeFrame = 0
 let initialMessageTimer = 0
 let copyFeedbackTimer = 0
@@ -197,6 +188,8 @@ function getResizeMetrics() {
 
   const libraryRect = library.getBoundingClientRect()
   const columnGap = Number.parseFloat(window.getComputedStyle(library).columnGap) || 0
+  if (!libraryRect.width) return null
+  stackedPanels.value = libraryRect.width < CHAT_PANEL_MIN_WIDTH + CABINET_PANEL_MIN_WIDTH + columnGap
   const maximumWidth = Math.max(
     CHAT_PANEL_MIN_WIDTH,
     libraryRect.width - columnGap - CABINET_PANEL_MIN_WIDTH,
@@ -229,7 +222,7 @@ function updateResizeMetrics() {
 }
 
 function startChatPanelResize(event) {
-  if (window.matchMedia('(max-width: 900px)').matches) return
+  if (stackedPanels.value) return
 
   const metrics = getResizeMetrics()
   if (!metrics) return
@@ -263,6 +256,7 @@ function finishChatPanelResize(event) {
 }
 
 function resizeChatPanelWithKeyboard(event) {
+  if (stackedPanels.value) return
   const metrics = getResizeMetrics()
   if (!metrics) return
 
@@ -309,17 +303,40 @@ function bindConversationNameInput(element) {
   conversationNameInputRef.value = element
 }
 
-function finishConversationRename(conversation) {
-  if (editingConversationId.value !== conversation.id) return
-
-  const nextName = conversationNameDraft.value.replace(/\s+/g, ' ').trim()
-  if (nextName) {
-    conversation.name = nextName
-    conversation.customName = true
+async function finishConversationRename(conversation) {
+  if (editingConversationId.value !== conversation.id || conversation.renaming) return
+  try {
+    await communication.renameConversation(conversation, conversationNameDraft.value)
+    editingConversationId.value = null
+    conversationNameDraft.value = ''
+  } catch (error) {
+    if (error.name !== 'AbortError') showAttachmentNotice('修改名称失败', error.message)
   }
+}
 
-  editingConversationId.value = null
-  conversationNameDraft.value = ''
+function deleteConversation(conversation) {
+  if (!conversation.registered || conversation.deleting || conversation.renaming || conversation.submitting || conversation.cancelling) return
+  conversationToDelete.value = conversation
+  conversationDeleteError.value = ''
+  historyMenuOpen.value = false
+}
+
+function closeConversationDelete() {
+  if (conversationToDelete.value?.deleting) return
+  conversationToDelete.value = null
+  conversationDeleteError.value = ''
+}
+
+async function confirmConversationDelete(confirmation) {
+  const conversation = conversationToDelete.value
+  if (!conversation || conversation.deleting || confirmation !== `我确认删除${conversation.name}`) return
+  conversationDeleteError.value = ''
+  try {
+    await communication.deleteConversation(conversation)
+    closeConversationDelete()
+  } catch (error) {
+    if (error.name !== 'AbortError') conversationDeleteError.value = error.message
+  }
 }
 
 function cancelConversationRename() {
@@ -346,26 +363,6 @@ function markMessageEntering(messageIdValue) {
   messageEntryTimers.set(messageIdValue, timer)
 }
 
-function setInitialReplyPending(conversationIdValue, pending) {
-  const nextConversationIds = new Set(initialReplyConversationIds.value)
-
-  if (pending) {
-    nextConversationIds.add(conversationIdValue)
-  } else {
-    nextConversationIds.delete(conversationIdValue)
-  }
-
-  initialReplyConversationIds.value = nextConversationIds
-}
-
-function formatMessageTime(date = new Date()) {
-  return new Intl.DateTimeFormat('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(date)
-}
-
 function toggleProcessPath(messageIdValue) {
   const nextExpandedIds = new Set(expandedProcessIds.value)
 
@@ -379,6 +376,7 @@ function toggleProcessPath(messageIdValue) {
 }
 
 async function copyMessage(message) {
+  if (!canCopyMessage(message)) return
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(message.content)
@@ -404,126 +402,88 @@ async function copyMessage(message) {
   }
 }
 
-async function branchFromMessage(messageIdValue) {
-  const sourceConversation = conversations.value[activeConversation.value]
-  const sourceMessageIndex = sourceConversation.messages.findIndex((message) => message.id === messageIdValue)
-  if (sourceMessageIndex < 0) return
 
-  const branchedMessages = sourceConversation.messages
-    .slice(0, sourceMessageIndex + 1)
-    .map((message) => ({
-      ...message,
-      id: ++messageId,
-      attachments: message.attachments?.map((attachment) => ({ ...attachment })),
-      processPath: message.processPath?.slice(),
-    }))
-  const branchedConversation = {
-    id: ++conversationId,
-    name: `${sourceConversation.name.replace(/ · 分支$/, '')} · 分支`,
-    customName: true,
-    messages: branchedMessages,
-    replying: false,
+watch(() => [currentConversation.value, messages.value.findLast((message) => message.role === 'user' && !message.fromHistory)?.id], async ([conversation, messageId], previous) => {
+  if (!messageId || restoring.value || !props.active || conversation !== previous?.[0] || messageId === previous?.[1]) return
+  await nextTick()
+  if (currentConversation.value === conversation) messageScrollFollower?.pin(messageElements.get(messageId))
+}, { flush: 'post' })
+
+async function submitPrompt() {
+  const content = prompt.value
+  const files = [...selectedAttachments.value]
+  const conversation = currentConversation.value
+  if ((!content.trim() && !files.length) || composerBusy.value || restoring.value) return
+  try {
+    validateTurnInput(content, files)
+  } catch (error) {
+    showAttachmentNotice('无法发送', error.message)
+    return
   }
-  const insertIndex = conversations.value[0]?.messages.length === 0 ? 1 : 0
-
-  conversations.value.splice(insertIndex, 0, branchedConversation)
-  activeConversation.value = insertIndex
-  historyMenuOpen.value = false
-  previewQuestion.value = null
-  anchoredQuestionId.value = null
-  await nextTick()
-  messageListRef.value?.scrollTo({ top: 0 })
-}
-
-async function scrollQuestionToTop(messageIdValue) {
-  await nextTick()
-  const list = messageListRef.value
-  const message = messageElements.get(messageIdValue)
-  if (!list || !message) return
-
-  const listRect = list.getBoundingClientRect()
-  const messageTop = list.scrollTop + message.getBoundingClientRect().top - listRect.top
-  const topPadding = Number.parseFloat(window.getComputedStyle(list).paddingTop) || 0
-  list.scrollTo({
-    top: messageTop - topPadding,
-    behavior: 'smooth',
-  })
-}
-
-function submitPrompt() {
-  const content = prompt.value.trim()
-  if ((!content && !selectedAttachments.value.length) || replying.value) return
-
-  const conversation = conversations.value[activeConversation.value]
   const isInitialMessage = conversation.messages.length === 0
+  const isNewConversation = !conversation.registered
   const userMessage = {
-    id: ++messageId,
+    id: crypto.randomUUID(),
     role: 'user',
-    content: content || '请分析已添加的附件。',
-    attachments: selectedAttachments.value.map((file) => ({
-      name: file.name,
-      size: file.size,
-      type: file.type,
-    })),
+    content,
+    attachments: files.map((file) => ({ name: file.name, size: file.size, type: file.type })),
   }
-
-  if (isInitialMessage) {
-    if (!conversation.customName) {
-      conversation.name = createConversationTitle(content, selectedAttachments.value)
+  if (conversation.replying || conversation.queue.length) {
+    communication.enqueue(conversation, content, files, userMessage)
+    clearComposerDraft()
+    return
+  }
+  try {
+    const turn = await communication.submit(conversation, content, files, userMessage)
+    if (!turn) return
+    if (isInitialMessage) {
+      if (isNewConversation && !conversation.customName) conversation.name = createConversationTitle(content, files)
+      if (!conversations.value.some((c) => !c.registered)) conversations.value.unshift(newConversation())
+      activeConversation.value = conversations.value.findIndex((item) => item.id === conversation.id)
+      initialMessageId.value = userMessage.id
+      window.clearTimeout(initialMessageTimer)
+      initialMessageTimer = window.setTimeout(() => {
+        if (initialMessageId.value === userMessage.id) initialMessageId.value = null
+      }, 1000)
+    } else markMessageEntering(userMessage.id)
+    clearComposerDraft()
+    communication.persist()
+    if (isNewConversation) {
+      void communication.refreshConversations()
+      void communication.loadHistory(conversation)
     }
-    conversations.value.unshift({
-      id: ++conversationId,
-      name: '新对话',
-      messages: [],
-      replying: false,
-    })
-    activeConversation.value = conversations.value.findIndex((item) => item.id === conversation.id)
-    initialMessageId.value = userMessage.id
-    setInitialReplyPending(conversation.id, true)
-    window.clearTimeout(initialMessageTimer)
-    initialMessageTimer = window.setTimeout(() => {
-      if (initialMessageId.value === userMessage.id) initialMessageId.value = null
-    }, 1000)
-  } else {
-    markMessageEntering(userMessage.id)
+  } catch (error) {
+    if (error.name !== 'AbortError') showAttachmentNotice('消息未发送', error.message)
   }
+}
 
-  conversation.messages.push(userMessage)
-  anchoredQuestionId.value = userMessage.id
+function clearComposerDraft() {
   prompt.value = ''
   selectedAttachments.value = []
   if (attachmentInputRef.value) attachmentInputRef.value.value = ''
-  conversation.replying = true
   nextTick(collapseComposer)
-  if (!isInitialMessage) scrollQuestionToTop(userMessage.id)
-
-  window.clearTimeout(replyTimers.get(conversation.id))
-  const replyTimer = window.setTimeout(() => {
-    const reply = {
-      id: ++messageId,
-      role: 'assistant',
-      processingTime: '处理了 1 秒',
-      processPath: ['理解问题与当前会话上下文', '准备原型回复内容'],
-      createdAt: formatMessageTime(),
-      content: '已收到你的问题。当前为交互原型，接入合同数据与智能分析服务后，我会在这里返回具体结果。',
-    }
-    markMessageEntering(reply.id)
-    conversation.messages.push(reply)
-    conversation.replying = false
-    setInitialReplyPending(conversation.id, false)
-    replyTimers.delete(conversation.id)
-  }, isInitialMessage ? INITIAL_REPLY_DELAY : FOLLOW_UP_REPLY_DELAY)
-  replyTimers.set(conversation.id, replyTimer)
 }
 
-function stopReply() {
-  const conversation = conversations.value[activeConversation.value]
-  if (!conversation?.replying) return
+async function steerQueuedMessage(item) {
+  try {
+    await communication.sendQueued(currentConversation.value, item, { steer: true })
+  } catch (error) {
+    if (error.name !== 'AbortError') showAttachmentNotice('队列消息未发送', error.message)
+  }
+}
 
-  window.clearTimeout(replyTimers.get(conversation.id))
-  replyTimers.delete(conversation.id)
-  conversation.replying = false
-  setInitialReplyPending(conversation.id, false)
+async function stopReply() {
+  const conversation = currentConversation.value
+  const follow = messageScrollFollower?.isFollowing()
+  messageScrollFollower?.pause()
+  try {
+    await communication.cancel(conversation)
+    await nextTick()
+    if (currentConversation.value === conversation && conversation.turns.at(-1)?.status === 'cancelled' && follow) restoreLastQuestionPosition()
+  } catch (error) {
+    if (currentConversation.value === conversation && follow) messageScrollFollower?.resume()
+    if (error.name !== 'AbortError') showAttachmentNotice('停止失败', error.message || '请重试')
+  }
 }
 
 function handleComposerKeydown(event) {
@@ -568,18 +528,174 @@ function selectAttachments() {
   attachmentInputRef.value?.click()
 }
 
-function handleAttachmentChange(event) {
-  selectedAttachments.value = Array.from(event.target.files ?? [])
+async function handleAttachmentChange(event) {
+  const files = Array.from(event.target.files ?? [])
+  // 清空原生选择值，移除后仍可再次选择同一文件。
+  event.target.value = ''
+  if (convertingAttachments.value || !files.length) return
+  convertingAttachments.value = true
+  try {
+    // 逐份处理，避免多张大图同时解码造成内存峰值。
+    for (const file of files) {
+      if (attachmentSelectionDisposed) return
+      const sourceKey = JSON.stringify([file.name, file.size, file.lastModified])
+      if (selectedAttachments.value.some((selected) => attachmentSourceKeys.get(selected) === sourceKey)) continue
+      const kind = getSelectedFileKind(file)
+      if (!kind) {
+        showAttachmentNotice(file.name, '无法转为 PDF：暂不支持此文件格式')
+        continue
+      }
+      try {
+        const pdfFile = kind === 'pdf' ? file : await convertImageFileToPdf(file)
+        if (attachmentSelectionDisposed) return
+        try {
+          validateTurnInput('', [...selectedAttachments.value, pdfFile])
+        } catch (error) {
+          showAttachmentNotice(file.name, error.message)
+          continue
+        }
+        attachmentSourceKeys.set(pdfFile, sourceKey)
+        selectedAttachments.value.push(pdfFile)
+      } catch {
+        if (!attachmentSelectionDisposed) showAttachmentNotice(file.name, '转换 PDF 失败，请检查文件后重试')
+      }
+    }
+  } finally {
+    convertingAttachments.value = false
+  }
+}
+
+function dismissAttachmentNotice(id) {
+  window.clearTimeout(attachmentNoticeTimers.get(id))
+  attachmentNoticeTimers.delete(id)
+  attachmentNotices.value = attachmentNotices.value.filter((notice) => notice.id !== id)
+}
+
+function showAttachmentNotice(name, message) {
+  const id = ++attachmentNoticeId
+  attachmentNotices.value.push({ id, name, message })
+  attachmentNoticeTimers.set(id, window.setTimeout(() => dismissAttachmentNotice(id), 6000))
+}
+
+function removeAttachment(index) {
+  if (currentConversation.value.submitting) return
+  if (selectedAttachments.value[index] === attachmentPreviewFile.value) closeAttachmentPreview()
+  selectedAttachments.value.splice(index, 1)
+}
+
+function closeAttachmentPreview() {
+  attachmentPreviewFile.value = null
+  if (attachmentPreviewUrl.value) URL.revokeObjectURL(attachmentPreviewUrl.value)
+  attachmentPreviewUrl.value = ''
+  attachmentPreviewError.value = ''
+}
+
+function previewAttachment(file) {
+  closeAttachmentPreview()
+  attachmentPreviewFile.value = file
+  if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+    attachmentPreviewError.value = '暂不支持此格式的预览，目前仅支持 PDF。'
+    return
+  }
+  try {
+    // 固定预览媒体类型，避免浏览器将本地附件作为可执行 HTML 打开。
+    attachmentPreviewUrl.value = URL.createObjectURL(file.slice(0, file.size, 'application/pdf'))
+  } catch {
+    attachmentPreviewError.value = '无法打开此附件，请移除后重新选择。'
+  }
+}
+
+function prepareAttachmentLeave(element) {
+  element.style.width = `${element.getBoundingClientRect().width}px`
 }
 
 async function selectConversation(index) {
+  if (currentConversation.value.submitting || restoring.value) return
+  const revision = ++revealRevision
+  conversationVisible.value = false
+  messageScrollFollower?.clearPin()
   activeConversation.value = index
+  communication.persist()
   historyMenuOpen.value = false
   previewQuestion.value = null
-  anchoredQuestionId.value = null
-  await nextTick()
-  messageListRef.value?.scrollTo({ top: 0 })
+  const conversation = currentConversation.value
+  await communication.loadHistory(conversation)
+  if (conversation.historyLoading) await new Promise((resolve) => {
+    const stop = watch(() => conversation.historyLoading, (loading) => { if (!loading) { stop(); resolve() } })
+  })
+  await revealPositionedConversation(conversation, revision)
 }
+
+async function revealPositionedConversation(conversation, revision) {
+  await nextTick()
+  const current = () => revision === revealRevision && currentConversation.value === conversation
+  if (!current()) return
+  restoreLastQuestionPosition()
+  setupHistoryPull()
+  // 隐藏状态下完成最小高度、ResizeObserver 和滚动定位，再开始整体淡入。
+  await new Promise((resolve) => requestAnimationFrame(resolve))
+  if (!current()) return
+  restoreLastQuestionPosition()
+  await new Promise((resolve) => requestAnimationFrame(resolve))
+  if (current()) conversationVisible.value = true
+}
+
+function restoreLastQuestionPosition() {
+  const message = messages.value.findLast((item) => item.role === 'user')
+  if (message) messageScrollFollower?.pin(messageElements.get(message.id), { follow: false })
+  else messageScrollFollower?.resume()
+}
+
+const canLoadEarlierHistory = computed(() => currentConversation.value.historyLoaded && currentConversation.value.history?.hasMore
+  && !currentConversation.value.historyLoading && !currentConversation.value.historyNeedsOpen && !currentConversation.value.deleting)
+
+function loadEarlierHistory() {
+  if (!canLoadEarlierHistory.value) return
+  messageScrollFollower?.pause()
+  return communication.loadHistory(currentConversation.value, true)
+}
+
+async function retryHistory() {
+  if (!currentConversation.value.historyRetryEarlier || currentConversation.value.historyNeedsOpen || !currentConversation.value.historyLoaded) {
+    const conversation = currentConversation.value
+    const revision = ++revealRevision
+    conversationVisible.value = false
+    await communication.loadHistory(conversation)
+    return revealPositionedConversation(conversation, revision)
+  }
+  return loadEarlierHistory()
+}
+
+function setupHistoryPull() {
+  disposeHistoryPull?.()
+  if (!messageListRef.value || !props.active) return
+  disposeHistoryPull = createHistoryPullRefresh(messageListRef.value, {
+    canLoad: () => canLoadEarlierHistory.value,
+    load: loadEarlierHistory,
+    onDistance: (distance) => { historyPullDistance.value = distance },
+  })
+}
+
+watch(() => [currentConversation.value.id, currentConversation.value.history], async ([conversationId, history], previous) => {
+  if (!history || !props.active) return
+  const list = messageListRef.value
+  if (!list) return
+  const preserve = previous?.[0] === conversationId && currentConversation.value.historyChangeKind === 'earlier'
+  const listTop = list.getBoundingClientRect().top
+  const anchor = preserve ? [...list.querySelectorAll('[data-message-id]')].find((element) => {
+    const rect = element.getBoundingClientRect()
+    return rect.height > 0 && rect.bottom > listTop && rect.top < listTop + list.clientHeight
+  }) : null
+  const offset = anchor?.getBoundingClientRect().top - listTop
+  const oldTop = list.scrollTop
+  if (preserve) messageScrollFollower?.pause()
+  await nextTick()
+  if (currentConversation.value.id !== conversationId || currentConversation.value.history !== history) return
+  if (preserve) {
+    if (anchor?.isConnected) list.scrollTop += anchor.getBoundingClientRect().top - list.getBoundingClientRect().top - offset
+    else list.scrollTop = oldTop
+  }
+})
 
 function bindMessageElement(element, messageIdValue) {
   if (element) {
@@ -590,6 +706,7 @@ function bindMessageElement(element, messageIdValue) {
 }
 
 function scrollToMessage(messageIdValue) {
+  messageScrollFollower?.pause()
   const list = messageListRef.value
   const message = messageElements.get(messageIdValue)
   if (!list || !message) return
@@ -627,16 +744,32 @@ async function activateLibraryView() {
   libraryViewActive = true
   await nextTick()
   updateResizeMetrics()
+  messageScrollFollower = createMessageScrollFollower(messageListRef.value, messageContentRef.value)
+  setupHistoryPull()
+  libraryResizeObserver = new ResizeObserver(updateResizeMetrics)
+  libraryResizeObserver.observe(contractLibraryRef.value)
   window.addEventListener('resize', updateResizeMetrics)
 }
 
 function deactivateLibraryView() {
+  closeConversationDelete()
+  closeAttachmentPreview()
   if (!libraryViewActive) return
   libraryViewActive = false
+  disposeHistoryPull?.()
+  disposeHistoryPull = null
+  messageScrollFollower?.dispose()
+  messageScrollFollower = null
+  libraryResizeObserver?.disconnect()
+  libraryResizeObserver = null
   window.removeEventListener('resize', updateResizeMetrics)
 }
 
 onMounted(() => {
+  const revision = ++revealRevision
+  void communication.restore().then(async () => {
+    await revealPositionedConversation(currentConversation.value, revision)
+  })
   if (props.active) activateLibraryView()
 })
 
@@ -648,12 +781,16 @@ watch(() => props.active, (active) => {
 })
 
 onBeforeUnmount(() => {
+  revealRevision += 1
+  window.clearInterval(processingTimer)
+  communication.dispose()
+  attachmentSelectionDisposed = true
+  attachmentNoticeTimers.forEach((timer) => window.clearTimeout(timer))
+  attachmentNoticeTimers.clear()
   deactivateLibraryView()
   window.clearTimeout(initialMessageTimer)
   window.clearTimeout(copyFeedbackTimer)
   window.cancelAnimationFrame(composerResizeFrame)
-  replyTimers.forEach((timer) => window.clearTimeout(timer))
-  replyTimers.clear()
   messageEntryTimers.forEach((timer) => window.clearTimeout(timer))
   messageEntryTimers.clear()
 })
@@ -663,8 +800,8 @@ onBeforeUnmount(() => {
   <section
     ref="contractLibraryRef"
     class="contract-library"
-    :class="{ 'is-resizing': resizingChatPanel }"
-    :style="chatPanelWidth === null ? undefined : { '--contract-agent-width': `${chatPanelWidth}px` }"
+    :class="{ 'is-resizing': resizingChatPanel, 'is-stacked': stackedPanels }"
+    :style="{ '--contract-archive-min-width': `${CABINET_PANEL_MIN_WIDTH}px`, ...(chatPanelWidth === null ? {} : { '--contract-agent-width': `${chatPanelWidth}px` }) }"
     aria-label="合同库工作台"
   >
     <section ref="contractAgentRef" class="contract-agent" aria-labelledby="contract-agent-title">
@@ -689,18 +826,23 @@ onBeforeUnmount(() => {
         </button>
 
         <div class="contract-agent__history-menu" role="menu" aria-label="选择历史对话">
+          <div v-if="listLoading || listError" class="communication-history-notice" role="status">
+            <span>{{ listLoading ? '正在加载会话…' : listError }}</span>
+            <button v-if="listError && !listLoading" type="button" @click.stop="communication.refreshConversations()">重试</button>
+          </div>
           <div
             v-for="(conversation, index) in conversations"
             :key="conversation.id"
             class="contract-agent__history-item"
-            :class="{ 'is-active': activeConversation === index, 'is-editing': editingConversationId === conversation.id }"
+            :class="{ 'is-active': activeConversation === index, 'is-editing': editingConversationId === conversation.id, 'has-actions': conversation.registered }"
           >
             <template v-if="editingConversationId === conversation.id">
               <input
                 :ref="bindConversationNameInput"
                 v-model="conversationNameDraft"
                 type="text"
-                maxlength="40"
+                maxlength="200"
+                :disabled="conversation.renaming"
                 aria-label="修改对话名称"
                 @click.stop
                 @keydown.enter.prevent="finishConversationRename(conversation)"
@@ -711,6 +853,7 @@ onBeforeUnmount(() => {
                 class="contract-agent__history-confirm"
                 type="button"
                 aria-label="保存对话名称"
+                :disabled="conversation.renaming"
                 @mousedown.prevent
                 @click.stop="finishConversationRename(conversation)"
               >
@@ -731,14 +874,27 @@ onBeforeUnmount(() => {
                 <i aria-hidden="true"></i>
               </button>
               <button
+                v-if="conversation.registered"
                 class="contract-agent__history-rename"
                 type="button"
+                :disabled="conversation.deleting || conversation.submitting || conversation.renaming"
                 :aria-label="`重命名对话：${conversation.name}`"
                 @click.stop="startConversationRename(conversation)"
               >
                 <svg viewBox="0 0 20 20" aria-hidden="true">
                   <path d="m12.7 4.1 3.2 3.2M4 16l2.8-.6 8.4-8.4a1.8 1.8 0 0 0 0-2.5 1.8 1.8 0 0 0-2.5 0l-8.4 8.4L4 16Z" />
                 </svg>
+              </button>
+              <button
+                v-if="conversation.registered"
+                class="contract-agent__history-delete"
+                type="button"
+                :disabled="conversation.deleting || conversation.renaming || conversation.submitting || conversation.cancelling"
+                :aria-label="`删除对话：${conversation.name}`"
+                :title="conversation.deleting ? '正在删除…' : '删除会话'"
+                @click.stop="deleteConversation(conversation)"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5.5h13M7.5 5.5v-2h5v2M5 5.5l.7 11h8.6l.7-11M8 8.5v5M12 8.5v5" /></svg>
               </button>
             </template>
           </div>
@@ -790,8 +946,14 @@ onBeforeUnmount(() => {
         </Transition>
 
         <div class="contract-agent__main">
+          <TransitionGroup v-if="active" tag="div" name="attachment-notice" class="attachment-notices" aria-live="polite" aria-relevant="additions">
+            <div v-for="notice in attachmentNotices" :key="notice.id" class="attachment-notice">
+              <div><strong :title="notice.name">{{ notice.name }}</strong><span>{{ notice.message }}</span></div>
+              <button type="button" aria-label="关闭提示" @click="dismissAttachmentNotice(notice.id)">×</button>
+            </div>
+          </TransitionGroup>
           <Transition name="contract-agent-empty">
-            <div v-if="!messages.length" class="contract-agent__empty">
+            <div v-if="conversationVisible && !messages.length && !currentConversation.submitting && !currentConversation.registered" class="contract-agent__empty">
               <HandwritingPrompt />
             </div>
           </Transition>
@@ -799,13 +961,38 @@ onBeforeUnmount(() => {
           <div
             ref="messageListRef"
             class="contract-agent__messages"
+            :class="{ 'is-positioning': !conversationVisible }"
+            :inert="!conversationVisible"
+            :aria-hidden="!conversationVisible || undefined"
+            tabindex="0"
+            aria-label="对话消息"
             aria-live="polite"
           >
+            <div ref="messageContentRef" class="contract-agent__messages-content">
+            <div v-if="currentConversation.registered" class="communication-history-control" role="status">
+              <span v-if="currentConversation.historyLoading">正在加载历史…</span>
+              <template v-else-if="currentConversation.historyError">
+                <span>{{ currentConversation.historyError }}</span><button type="button" @click="retryHistory">{{ currentConversation.historyNeedsOpen ? '重新打开' : '重试' }}</button>
+              </template>
+              <button v-else-if="canLoadEarlierHistory" type="button" @click="loadEarlierHistory">
+                <span aria-hidden="true" :style="{ transform: `rotate(${historyPullDistance >= 64 ? 180 : 0}deg)` }">↓</span>
+                {{ historyPullDistance >= 64 ? '松开加载更早记录' : '下拉或点击加载更早记录' }}
+              </button>
+              <span v-else-if="currentConversation.historyLoaded && !messages.length">暂无已归档的历史记录</span>
+            </div>
+            <div
+              v-for="section in messageSections"
+              :key="section.id"
+              :class="section.process ? ['communication-process-region', { 'is-collapsed': processIsCollapsed(section) }] : 'communication-message-section'"
+              :inert="processIsCollapsed(section)"
+              :aria-hidden="processIsCollapsed(section) || undefined"
+            >
+            <div :class="section.process ? 'communication-process-region__content' : 'communication-message-section'">
+            <template v-for="message in section.messages" :key="message.id">
             <article
-              v-for="message in messages"
-              :key="message.id"
               :ref="(element) => bindMessageElement(element, message.id)"
               class="contract-agent__message"
+              :data-message-id="message.id"
               :class="[
                 `contract-agent__message--${message.role}`,
                 {
@@ -815,8 +1002,8 @@ onBeforeUnmount(() => {
               ]"
             >
               <div v-if="message.role === 'assistant'" class="contract-agent__response">
-                <div class="contract-agent__response-header">
-                  <span>{{ message.processingTime || '处理完成' }}</span>
+                <div v-if="message.operationLabel || message.processPath?.length" class="contract-agent__response-header">
+                  <span v-if="message.operationLabel">{{ message.operationLabel }}</span>
                   <button
                     v-if="message.processPath?.length"
                     type="button"
@@ -855,9 +1042,13 @@ onBeforeUnmount(() => {
                 <MarkdownMessage
                   class="contract-agent__message-content"
                   :content="message.content"
+                  :stream-state="message.status"
+                  stabilize-height
+                  :animate="active && !message.fromHistory"
+                  @display-state="updateMessageDisplay(message.id, $event)"
                 />
 
-                <footer class="contract-agent__message-actions" aria-label="回复操作">
+                <footer v-if="canCopyMessage(message)" class="contract-agent__message-actions" aria-label="回复操作">
                   <button
                     type="button"
                     class="contract-agent__copy-action"
@@ -880,54 +1071,148 @@ onBeforeUnmount(() => {
                       </svg>
                     </Transition>
                   </button>
-                  <button
-                    type="button"
-                    aria-label="从此回复创建分支"
-                    @click="branchFromMessage(message.id)"
-                  >
-                    <svg viewBox="0 0 20 20" aria-hidden="true">
-                      <circle cx="5" cy="4" r="1.75" />
-                      <circle cx="15" cy="6" r="1.75" />
-                      <circle cx="5" cy="16" r="1.75" />
-                      <path d="M5 5.75v8.5M6.75 10h2.5A5.75 5.75 0 0 0 15 4.25" />
-                    </svg>
-                  </button>
                   <time v-if="message.createdAt">{{ message.createdAt }}</time>
                 </footer>
               </div>
 
-              <MarkdownMessage
-                v-else
-                class="contract-agent__message-content"
-                :content="message.content"
-              />
+              <template v-else>
+                <ul v-if="message.attachments?.length" class="contract-agent__sent-files" aria-label="已上传的文件">
+                  <li v-for="(file, index) in message.attachments" :key="index" :title="file.name">
+                    <span class="contract-agent__sent-file-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11.5 2.5h-6a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-10zm0 0v4h4M7.5 10h5M7.5 13h5" /></svg></span>
+                    <div class="contract-agent__sent-file-info"><span>{{ file.name }}</span><small>PDF 文档</small></div>
+                  </li>
+                </ul>
+                <MarkdownMessage
+                  v-if="message.content?.trim()"
+                  class="contract-agent__message-content"
+                  :content="message.content"
+                />
+              </template>
+              <span v-if="message.role === 'user' && ['rejected', 'failed', 'expired'].includes(message.turnStatus)" class="communication-message-status">{{ turnLabels[message.turnStatus] }}</span>
+              <ul v-if="message.references?.length" class="communication-references" aria-label="引用合同">
+                <li v-for="(reference, index) in message.references" :key="index" :title="reference.document_id">
+                  <a v-if="reference.type === 'web'" :href="reference.location" target="_blank" rel="noopener noreferrer">{{ reference.location }}</a>
+                  <span v-else-if="reference.type === 'contract'" :title="reference.location">合同引用 · {{ reference.location }}</span>
+                  <template v-else>合同 {{ reference.document_id?.slice(0, 12) }}…<template v-if="reference.page_number"> · 第 {{ reference.page_number }} 页</template></template>
+                </li>
+              </ul>
             </article>
-
-            <article
-              v-if="replying"
-              class="contract-agent__message contract-agent__message--assistant contract-agent__message--typing-entry"
-              :class="{ 'is-initial-reply': isInitialReplyPending }"
-            >
-              <div class="contract-agent__typing" aria-label="智能助手正在回复">
-                <i></i><i></i><i></i>
+            <Transition name="turn-timing">
+              <div v-if="message.role === 'user' && (messageTimingLabel(message) || processToggleTurns.has(message.turnId))" class="communication-turn-timing" aria-live="off">
+                <div class="communication-turn-timing__content">
+                  <div class="communication-turn-timing__row">
+                    <span v-if="messageTimingLabel(message)">{{ messageTimingLabel(message) }}</span>
+                    <button
+                      v-if="processToggleTurns.has(message.turnId)"
+                      type="button"
+                      class="communication-process-toggle"
+                      :aria-expanded="expandedTurnProcesses.has(message.turnId)"
+                      :aria-label="expandedTurnProcesses.has(message.turnId) ? '收起处理过程' : '展开处理过程'"
+                      :title="expandedTurnProcesses.has(message.turnId) ? '收起处理过程' : '展开处理过程'"
+                      @click="toggleTurnProcess(message.turnId)"
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true" :class="{ 'is-expanded': expandedTurnProcesses.has(message.turnId) }"><path d="m6 4 4 4-4 4" /></svg>
+                    </button>
+                  </div>
+                  <hr aria-hidden="true" />
+                </div>
               </div>
-            </article>
+            </Transition>
+            </template>
+            </div>
+            </div>
 
-            <span
-              v-if="anchoredQuestionId"
-              class="contract-agent__scroll-space"
-              aria-hidden="true"
-            ></span>
+            <div v-if="restoring" class="communication-status" role="status">正在恢复对话…</div>
+            <div v-if="currentTurn" class="communication-status" aria-live="polite">
+              <p v-if="replying && !currentConversation.submitting && ['recovering', 'disconnected'].includes(currentTurn.connection)">{{ currentTurn.connection === 'recovering' ? '连接中断，正在恢复…' : '连接已断开，轮次状态待确认' }}</p>
+              <template v-if="currentTurn.gate_result && (!startedFinalTurns.has(currentTurn.turn_id) || expandedTurnProcesses.has(currentTurn.turn_id))">
+                <p>{{ currentTurn.gate_result.message }}</p>
+                <ul v-if="currentTurn.gate_result.files?.length">
+                  <li v-for="file in currentTurn.gate_result.files" :key="file.file_id" :class="{ 'is-error': !file.accepted }">
+                    {{ file.accepted ? '已保留' : '未保留' }} · {{ file.file_name }}<template v-if="file.reason">：{{ file.reason }}</template>
+                  </li>
+                </ul>
+              </template>
+              <p v-if="currentTurn.error" class="is-error" role="alert">{{ currentTurn.error.message }}</p>
+              <template v-if="currentTurn.connection === 'disconnected'">
+                <p class="is-error">{{ currentTurn.connectionError }}</p>
+                <button v-if="!currentTurn.unavailable" type="button" @click="communication.connect(currentConversation, currentTurn, true)">恢复连接</button>
+              </template>
+            </div>
+
+            <Transition name="tail-activity" mode="out-in">
+              <article
+                v-if="tailActivity"
+                :key="tailActivity.text"
+                class="contract-agent__message contract-agent__message--assistant communication-thinking"
+                :class="{ 'is-thinking': tailActivity.thinking }"
+              >
+                <div :class="tailActivity.thinking ? 'contract-agent__thinking' : 'communication-step'" role="status">{{ tailActivity.text }}</div>
+              </article>
+            </Transition>
+
+            </div>
           </div>
 
           <form class="contract-agent__composer" @submit.prevent="submitPrompt">
+            <div class="contract-agent__composer-accessories">
+            <TransitionGroup tag="ul" name="queued-prompt" class="contract-agent__prompt-queue" aria-label="待发送消息">
+              <li v-for="item in currentConversation.queue" :key="item.id" class="contract-agent__queued-prompt">
+                <div class="contract-agent__queued-content">
+                  <span :title="item.text || item.files.map((file) => file.name).join('、')">{{ item.text.trim() || item.files[0]?.name }}</span>
+                  <small v-if="item.files.length">{{ item.files.length }} 个附件</small>
+                  <small v-if="item.error" class="is-error" :title="item.error">发送失败，等待重试</small>
+                </div>
+                <button
+                  type="button"
+                  class="contract-agent__queue-steer"
+                  :disabled="currentConversation.submitting || currentConversation.cancelling"
+                  :title="replying ? '立即提交这条问题，替代当前轮次' : '立即发送这条排队消息'"
+                  @click="steerQueuedMessage(item)"
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 16v-4a5 5 0 0 1 5-5h5M11 3l4 4-4 4" /></svg>
+                  {{ item.sending ? '发送中' : replying ? '调整方向' : '立即发送' }}
+                </button>
+                <button type="button" class="contract-agent__queue-remove" :disabled="item.sending" aria-label="移除这条待发送消息" @click="communication.removeQueued(currentConversation, item.id)">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg>
+                </button>
+              </li>
+            </TransitionGroup>
+            <TransitionGroup
+              tag="ul"
+              name="attachment-chip"
+              class="contract-agent__attachments"
+              aria-label="已选附件"
+              @before-leave="prepareAttachmentLeave"
+            >
+              <li v-for="(file, index) in selectedAttachments" :key="attachmentSourceKeys.get(file)" class="contract-agent__attachment">
+                <button
+                  type="button"
+                  class="contract-agent__attachment-name"
+                  :title="file.name"
+                  :aria-label="`预览附件：${file.name}`"
+                  @click="previewAttachment(file)"
+                >{{ file.name }}</button>
+                <button
+                  type="button"
+                  class="contract-agent__attachment-remove"
+                  :aria-label="`移除附件：${file.name}`"
+                  :title="`移除 ${file.name}`"
+                  :disabled="currentConversation.submitting"
+                  @click="removeAttachment(index)"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg>
+                </button>
+              </li>
+            </TransitionGroup>
+            </div>
             <textarea
               ref="composerInputRef"
               v-model="prompt"
               rows="1"
               placeholder="询问合同相关问题…"
               aria-label="输入合同相关问题"
-              :disabled="replying"
+              :disabled="currentConversation.submitting || restoring"
               @input="resizeComposer"
               @keydown="handleComposerKeydown"
             ></textarea>
@@ -936,7 +1221,7 @@ onBeforeUnmount(() => {
               <button
                 class="contract-agent__composer-action contract-agent__composer-action--attach"
                 type="button"
-                :disabled="replying"
+                :disabled="composerBusy || restoring"
                 aria-label="添加附件"
                 @click="selectAttachments"
               >
@@ -957,16 +1242,19 @@ onBeforeUnmount(() => {
                 @change="handleAttachmentChange"
               />
 
+              <span v-if="convertingAttachments || currentConversation.cancelling" class="contract-agent__conversion-status" role="status">{{ convertingAttachments ? '正在转换为 PDF…' : '正在停止…' }}</span>
+
               <button
                 class="contract-agent__composer-action contract-agent__composer-action--send"
-                :class="{ 'is-stop': replying }"
-                :type="replying ? 'button' : 'submit'"
-                :disabled="!replying && !prompt.trim() && !selectedAttachments.length"
-                :aria-label="replying ? '停止回复' : '发送消息'"
-                @click="replying && stopReply()"
+                :class="{ 'is-stop': stopMode }"
+                :type="stopMode ? 'button' : 'submit'"
+                :disabled="composerBusy || restoring || (!replying && !prompt.trim() && !selectedAttachments.length)"
+                :aria-label="stopMode ? '停止回复' : replying || currentConversation.queue.length ? '加入消息队列' : '发送消息'"
+                :title="stopMode ? '停止回复' : replying || currentConversation.queue.length ? '加入队列，等待当前轮次完成' : '发送消息'"
+                @click="stopMode && stopReply()"
               >
                 <Transition name="send-state" mode="out-in">
-                  <svg v-if="!replying" key="send" viewBox="0 0 24 24" aria-hidden="true">
+                  <svg v-if="!stopMode" key="send" viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M12 19V5" />
                     <path d="m6.5 10.5 5.5-5.5 5.5 5.5" />
                   </svg>
@@ -1001,14 +1289,198 @@ onBeforeUnmount(() => {
     </section>
 
     <ContractArchivePanel :active="active" />
+    <DeleteConversationDialog
+      :open="Boolean(conversationToDelete)"
+      :name="conversationToDelete?.name || ''"
+      :busy="Boolean(conversationToDelete?.deleting)"
+      :error="conversationDeleteError"
+      @close="closeConversationDelete"
+      @confirm="confirmConversationDelete"
+    />
+    <PdfPreviewOverlay
+      :open="Boolean(attachmentPreviewFile)"
+      :src="attachmentPreviewUrl"
+      :label="attachmentPreviewFile?.name || ''"
+      :error="attachmentPreviewError"
+      :retryable="false"
+      @close="closeAttachmentPreview"
+    />
   </section>
 </template>
 
 <style scoped>
+.communication-history-control { display: flex; flex: none; justify-content: center; align-items: center; gap: 8px; color: #90998f; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.communication-history-control:empty { display: none; }
+.communication-history-control button { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border: 0; border-radius: 8px; background: transparent; color: #788c7d; font: inherit; cursor: pointer; }
+.communication-history-control button:hover { background: #edf2eb; }
+.communication-history-control button > span { display: inline-block; transition: transform .2s ease; }
+.contract-agent__history-delete { display: grid; place-items: center; flex: none; width: 26px; height: 28px; padding: 4px; border: 0; border-radius: 6px; background: transparent; color: #92978f; cursor: pointer; opacity: 0; transition: opacity .18s ease, color .18s ease, background-color .18s ease; }
+.contract-agent__history-item:hover .contract-agent__history-delete, .contract-agent__history-item:focus-within .contract-agent__history-delete { opacity: 1; }
+.contract-agent__history-delete:hover { color: #b05c58; background: #f8eae8; }
+.contract-agent__history-delete svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.contract-agent__history-item button:disabled { cursor: wait; }
+.communication-history-notice { display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: #78847b; font-size: 12px; }
+.communication-history-notice span { flex: 1; overflow-wrap: anywhere; }
+.communication-history-notice button { flex: none; border: 0; background: transparent; color: #466851; cursor: pointer; }
+.communication-process-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 5px;
+  padding: 3px 0;
+  color: #829087;
+  font-size: 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.communication-process-toggle:hover { color: #405b4a; }
+.communication-process-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s ease; }
+.communication-process-toggle svg.is-expanded { transform: rotate(90deg); }
+.communication-message-section { display: contents; }
+.communication-process-region {
+  display: grid;
+  grid-template-rows: 1fr;
+  flex: 0 0 auto;
+  min-width: 0;
+  transition:
+    grid-template-rows 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-bottom 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.28s ease;
+}
+.communication-process-region__content {
+  display: flex;
+  flex-direction: column;
+  gap: 17px;
+  min-height: 0;
+  overflow: hidden;
+}
+.communication-process-region.is-collapsed {
+  grid-template-rows: 0fr;
+  margin-bottom: -17px;
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .communication-process-region,
+  .communication-process-toggle svg { transition: none; }
+}
+.communication-step,
+.contract-agent__response-header > span {
+  color: #344c3e;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 24px;
+  overflow-wrap: anywhere;
+}
+.tail-activity-enter-active,
+.tail-activity-leave-active { transition: opacity 0.16s ease; }
+.tail-activity-enter-from,
+.tail-activity-leave-to { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .tail-activity-enter-active,
+  .tail-activity-leave-active { transition: none; }
+}
+.communication-turn-timing {
+  display: grid;
+  grid-template-rows: 1fr;
+  flex: 0 0 auto;
+  width: 100%;
+  color: #879189;
+  font-size: 12px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+.communication-turn-timing__content { min-height: 0; overflow: hidden; }
+.communication-turn-timing__row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
+.communication-turn-timing__row .communication-process-toggle { align-self: auto; padding-block: 0; }
+.turn-timing-enter-active,
+.turn-timing-leave-active {
+  transition:
+    grid-template-rows 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-bottom 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.3s ease;
+}
+.turn-timing-enter-from,
+.turn-timing-leave-to {
+  grid-template-rows: 0fr;
+  margin-bottom: -17px;
+  opacity: 0;
+}
+.communication-status:empty { display: none; }
+.communication-thinking.is-thinking {
+  margin-top: -9px;
+}
+.communication-step { margin-inline: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .turn-timing-enter-active,
+  .turn-timing-leave-active { transition: none; }
+}
+.communication-turn-timing hr {
+  margin: 9px 0 0;
+  border: 0;
+  border-top: 1px solid #dce3de;
+}
+.communication-status {
+  color: #7b8880;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.communication-status p { margin: 4px 0; }
+.communication-status ul, .communication-references { padding-left: 18px; margin: 6px 0; }
+.communication-status .is-error { color: #ad625a; }
+.communication-status button {
+  padding: 5px 10px;
+  color: #476955;
+  background: #edf2ee;
+  border: 1px solid #d7e1da;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.communication-message-status { display: block; margin: 5px 2px 0; color: #879189; font-size: 11px; text-align: right; }
+.communication-references { color: #829087; font-size: 11px; overflow-wrap: anywhere; }
+
+.attachment-notices {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: grid;
+  gap: 8px;
+  width: min(420px, calc(100% - 32px));
+  max-height: min(40%, 320px);
+  overflow-y: auto;
+  pointer-events: none;
+}
+
+.attachment-notice {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  color: #98544e;
+  background: #fff5f1;
+  border: 1px solid #efdcd5;
+  border-radius: 12px;
+  pointer-events: auto;
+}
+
+.attachment-notice > div { flex: 1; min-width: 0; }
+.attachment-notice strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.attachment-notice span { display: block; margin-top: 3px; font-size: 12px; }
+.attachment-notice button { padding: 4px; border: 0; background: transparent; color: inherit; font-size: 20px; cursor: pointer; }
+.attachment-notice-enter-active, .attachment-notice-leave-active { transition: opacity 0.22s, transform 0.22s; }
+.attachment-notice-enter-from, .attachment-notice-leave-to { opacity: 0; transform: translateY(-8px); }
+.contract-agent__conversion-status { color: #829287; font-size: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .attachment-notice-enter-active, .attachment-notice-leave-active { transition: none; }
+}
+
 .contract-library {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(360px, var(--contract-agent-width, 0.82fr)) minmax(480px, 1.18fr);
+  grid-template-columns: minmax(360px, var(--contract-agent-width, 0.82fr)) minmax(var(--contract-archive-min-width), 1.18fr);
   gap: 0;
   height: 100%;
   min-height: 0;
@@ -1131,6 +1603,7 @@ onBeforeUnmount(() => {
 
 .contract-agent__body {
   position: relative;
+  overflow: hidden;
   display: grid;
   flex: 1;
   grid-template-columns: 28px minmax(0, 1fr);
@@ -1258,11 +1731,10 @@ onBeforeUnmount(() => {
 }
 
 .contract-agent__header {
-  position: absolute;
+  position: relative;
+  flex: none;
+  flex-shrink: 0;
   z-index: 5;
-  top: 0;
-  right: 0;
-  left: 0;
   display: flex;
   align-items: center;
   min-height: 50px;
@@ -1345,6 +1817,7 @@ onBeforeUnmount(() => {
 }
 
 .contract-agent__history-item {
+  position: relative;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -1374,7 +1847,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   min-width: 0;
-  padding: 9px 5px 9px 10px;
+  padding: 9px 26px 9px 10px;
   color: inherit;
   font: inherit;
   font-size: 12px;
@@ -1384,6 +1857,19 @@ onBeforeUnmount(() => {
   border: 0;
   border-radius: 9px;
 }
+
+.contract-agent__history-item.has-actions .contract-agent__history-option { padding-right: 68px; }
+.contract-agent__history-item > .contract-agent__history-rename,
+.contract-agent__history-item > .contract-agent__history-delete {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.contract-agent__history-item > .contract-agent__history-rename { right: 32px; margin-right: 0; }
+.contract-agent__history-item > .contract-agent__history-delete { right: 5px; }
+.contract-agent__history-item:is(:hover, :focus-within) > .contract-agent__history-rename,
+.contract-agent__history-item:is(:hover, :focus-within) > .contract-agent__history-delete { pointer-events: auto; }
 
 .contract-agent__history-option:focus-visible {
   outline: 2px solid #7063d84a;
@@ -1397,17 +1883,22 @@ onBeforeUnmount(() => {
 }
 
 .contract-agent__history-option i {
+  position: absolute;
+  right: 15px;
+  top: calc(50% - 2.5px);
   flex: none;
   width: 5px;
   height: 5px;
   background: currentColor;
   border-radius: 50%;
   opacity: 0;
+  transition: opacity .18s ease;
 }
 
 .contract-agent__history-item.is-active .contract-agent__history-option i {
   opacity: 1;
 }
+.contract-agent__history-item.has-actions:is(:hover, :focus-within) .contract-agent__history-option i { opacity: 0; }
 
 .contract-agent__history-rename,
 .contract-agent__history-confirm {
@@ -1431,8 +1922,19 @@ onBeforeUnmount(() => {
 }
 
 .contract-agent__history-item:hover .contract-agent__history-rename,
-.contract-agent__history-rename:focus-visible {
+.contract-agent__history-item:focus-within .contract-agent__history-rename {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .contract-agent__history-item > .contract-agent__history-rename,
+  .contract-agent__history-item > .contract-agent__history-delete { opacity: 1; pointer-events: auto; }
+  .contract-agent__history-item.has-actions .contract-agent__history-option i { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .contract-agent__history-option i,
+  .contract-agent__history-item > .contract-agent__history-rename,
+  .contract-agent__history-item > .contract-agent__history-delete { transition: none; }
 }
 
 .contract-agent__history-rename:hover,
@@ -1472,27 +1974,39 @@ onBeforeUnmount(() => {
 }
 
 .contract-agent__messages {
+  opacity: 1;
+  transition: opacity .35s ease;
   position: relative;
-  display: flex;
   flex: 1;
-  flex-direction: column;
-  gap: 17px;
   min-height: 0;
-  padding: 72px 20px 24px;
   overflow-y: auto;
+  overflow-anchor: none;
   overscroll-behavior: contain;
   scrollbar-width: none;
 }
+.contract-agent__messages.is-positioning { opacity: 0; transition: none; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .contract-agent__messages { transition: none; } }
 
 .contract-agent__messages::-webkit-scrollbar {
   display: none;
 }
 
-.contract-agent__scroll-space {
-  flex: 0 0 calc(100% - 72px);
-  min-height: 120px;
-  pointer-events: none;
+.contract-agent__messages-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 17px;
+  min-height: var(--message-pinned-height, 100%);
+  box-sizing: border-box;
+  padding: 24px 20px 16px;
 }
+
+.contract-agent__messages-content::before {
+  content: '';
+  flex: none;
+  margin-top: auto;
+}
+.contract-agent__messages-content.is-question-pinned::before { margin-top: 0; }
 
 .contract-agent__message {
   position: relative;
@@ -1504,19 +2018,11 @@ onBeforeUnmount(() => {
 }
 
 .contract-agent__message.is-new-conversation-entry {
-  animation: contract-agent-message-rise 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.32s both;
+  animation: contract-agent-message-appear 0.5s ease both;
 }
 
 .contract-agent__message.is-message-entry {
   animation: contract-agent-message-enter 0.46s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.contract-agent__message--typing-entry {
-  animation: contract-agent-typing-enter 0.32s ease-out 0.5s both;
-}
-
-.contract-agent__message--typing-entry.is-initial-reply {
-  animation-delay: 0.96s;
 }
 
 .contract-agent__empty {
@@ -1539,7 +2045,6 @@ onBeforeUnmount(() => {
 
 .contract-agent-empty-leave-to {
   opacity: 0;
-  transform: translateY(-82px) scale(0.97);
 }
 
 .contract-agent__message-content {
@@ -1549,6 +2054,10 @@ onBeforeUnmount(() => {
 }
 
 .contract-agent__message--user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
   align-self: flex-end;
   width: auto;
   max-width: 86%;
@@ -1556,10 +2065,92 @@ onBeforeUnmount(() => {
 
 .contract-agent__message--user .contract-agent__message-content {
   width: auto;
-  padding: 9px 13px;
-  color: #35423b;
-  background: #edf0ee;
-  border-radius: 16px 16px 5px;
+  padding: 10px 15px;
+  color: #fff;
+  background: #171717;
+  border-radius: 16px;
+}
+
+.contract-agent__sent-files {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.contract-agent__sent-files li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 228px;
+  max-width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #e0e2e0;
+  border-radius: 14px;
+  background: #fafbfa;
+  color: #333936;
+  font-size: 13px;
+  line-height: 18px;
+}
+.contract-agent__sent-files svg {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.contract-agent__sent-file-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 38px;
+  border-radius: 8px;
+  background: #eeefee;
+  color: #636963;
+}
+.contract-agent__sent-file-info { min-width: 0; }
+.contract-agent__sent-file-info > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.contract-agent__sent-file-info small { display: block; margin-top: 3px; color: #868b87; font-size: 11px; }
+
+.contract-agent__message--user :deep(h1),
+.contract-agent__message--user :deep(h2),
+.contract-agent__message--user :deep(h3),
+.contract-agent__message--user :deep(h4),
+.contract-agent__message--user :deep(code),
+.contract-agent__message--user :deep(th) {
+  color: #fff;
+}
+
+.contract-agent__message--user :deep(a) {
+  color: #b9d5ff;
+}
+
+.contract-agent__message--user :deep(blockquote) {
+  color: #d4d4d4;
+  border-left-color: #666;
+}
+
+.contract-agent__message--user :deep(code),
+.contract-agent__message--user :deep(pre),
+.contract-agent__message--user :deep(th) {
+  background: #303030;
+}
+
+.contract-agent__message--user :deep(pre code) {
+  background: transparent;
+}
+
+.contract-agent__message--user :deep(th),
+.contract-agent__message--user :deep(td),
+.contract-agent__message--user :deep(hr) {
+  border-color: #505050;
 }
 
 .contract-agent__message--assistant .contract-agent__message-content {
@@ -1575,14 +2166,15 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 9px;
   align-items: center;
-  min-height: 25px;
+  min-height: 24px;
   margin: 0 2px 10px;
   color: #8a948f;
   font-size: 11px;
 }
 
 .contract-agent__response-header > span {
-  white-space: nowrap;
+  min-width: 0;
+  white-space: normal;
 }
 
 .contract-agent__response-header button {
@@ -1774,26 +2366,17 @@ onBeforeUnmount(() => {
   }
 }
 
-.contract-agent__typing {
-  display: flex;
-  gap: 4px;
-  align-items: center;
+.contract-agent__thinking {
   min-height: 24px;
   padding-inline: 2px;
+  color: #95a098;
+  font-size: 13px;
+  line-height: 24px;
+  animation: contract-agent-thinking-highlight 2.8s ease-in-out infinite;
 }
-
-.contract-agent__typing i {
-  width: 5px;
-  height: 5px;
-  background: #766bd0;
-  border-radius: 50%;
-  animation: contract-agent-typing 0.9s ease-in-out infinite alternate;
-}
-
-.contract-agent__typing i:nth-child(2) { animation-delay: 0.15s; }
-.contract-agent__typing i:nth-child(3) { animation-delay: 0.3s; }
 
 .contract-agent__composer {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -1820,6 +2403,210 @@ onBeforeUnmount(() => {
   border: 0;
   outline: 0;
   transition: height 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.contract-agent__composer-accessories {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.contract-agent__prompt-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 158px;
+  padding: 0 2px;
+  margin: 0;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+}
+.contract-agent__prompt-queue:empty { display: none; }
+.contract-agent__queued-prompt {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 9px 10px 9px 13px;
+  background: #f3f5f3;
+  border: 1px solid #dfe5df;
+  border-radius: 13px;
+  box-shadow: 0 3px 10px #253d2d08;
+}
+.contract-agent__queued-content { flex: 1; min-width: 0; color: #59665d; font-size: 12px; }
+.contract-agent__queued-content > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.contract-agent__queued-content small { display: inline-block; margin: 3px 8px 0 0; color: #8a968e; font-size: 10px; }
+.contract-agent__queued-content small.is-error { color: #ad625a; }
+.contract-agent__queue-steer,
+.contract-agent__queue-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 5px 7px;
+  color: #5a6d60;
+  font-size: 11px;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.contract-agent__queue-steer { background: #e6ece7; }
+.contract-agent__queue-steer:hover:not(:disabled) { color: #2e4e3a; background: #dce6dd; }
+.contract-agent__queue-remove { padding: 5px 3px; color: #929b95; }
+.contract-agent__queue-remove:hover:not(:disabled) { color: #b25b53; background: #f4e4e1; }
+.contract-agent__queue-steer:disabled,
+.contract-agent__queue-remove:disabled { cursor: default; opacity: 0.45; }
+.contract-agent__queue-steer svg,
+.contract-agent__queue-remove svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.queued-prompt-enter-active,
+.queued-prompt-leave-active,
+.queued-prompt-move { transition: opacity 0.2s ease, transform 0.25s ease; }
+.queued-prompt-enter-from,
+.queued-prompt-leave-to { opacity: 0; transform: translateY(5px); }
+@media (prefers-reduced-motion: reduce) {
+  .queued-prompt-enter-active,
+  .queued-prompt-leave-active,
+  .queued-prompt-move { transition: none; }
+}
+.contract-agent__attachments {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 14px 4px;
+  margin: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  list-style: none;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 14px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 14px, #000 calc(100% - 14px), transparent);
+}
+
+.contract-agent__attachments::-webkit-scrollbar {
+  display: none;
+}
+
+.contract-agent__attachments:empty {
+  display: none;
+}
+
+.attachment-chip-enter-active {
+  transition:
+    transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.3s ease;
+}
+
+.attachment-chip-enter-from {
+  opacity: 0;
+  transform: translateX(28px);
+}
+
+.attachment-chip-leave-active {
+  box-sizing: border-box;
+  overflow: hidden;
+  pointer-events: none;
+  transition:
+    width 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    padding 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    margin 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    border-width 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.18s ease;
+}
+
+.contract-agent__attachment.attachment-chip-leave-to {
+  width: 0 !important;
+  padding-inline: 0;
+  margin-right: -6px;
+  border-inline-width: 0;
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attachment-chip-enter-active,
+  .attachment-chip-leave-active {
+    transition: none;
+  }
+}
+
+.contract-agent__attachment {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: min(180px, 100%);
+  padding: 4px 5px 4px 10px;
+  color: #53685b;
+  background: #edf2ee;
+  border: 1px solid #dce6de;
+  border-radius: 9px;
+}
+
+.contract-agent__attachment-name {
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contract-agent__attachment-name:hover {
+  color: #2e6447;
+}
+
+.contract-agent__attachment-name:focus-visible {
+  outline: 2px solid #789886;
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+.contract-agent__attachment-remove {
+  display: grid;
+  flex: 0 0 22px;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: #829287;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  transition: color 0.18s, background-color 0.18s;
+}
+
+.contract-agent__attachment-remove:hover {
+  color: #b75353;
+  background: #f6e5e3;
+}
+
+.contract-agent__attachment-remove:focus-visible {
+  outline: 2px solid #789886;
+  outline-offset: 1px;
+}
+
+.contract-agent__attachment-remove svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.5;
 }
 
 .contract-agent__composer textarea::placeholder {
@@ -1943,11 +2730,9 @@ onBeforeUnmount(() => {
   transform: scale(0.72);
 }
 
-@keyframes contract-agent-typing {
-  to {
-    opacity: 0.32;
-    transform: translateY(-3px);
-  }
+@keyframes contract-agent-thinking-highlight {
+  0%, 25%, 100% { color: #95a098; }
+  48%, 58% { color: #405b4a; }
 }
 
 @keyframes contract-agent-copy-confirm {
@@ -1960,15 +2745,13 @@ onBeforeUnmount(() => {
   }
 }
 
-@keyframes contract-agent-message-rise {
+@keyframes contract-agent-message-appear {
   from {
     opacity: 0;
-    transform: translateY(clamp(180px, 34vh, 300px)) scale(0.96);
   }
 
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
   }
 }
 
@@ -1984,30 +2767,18 @@ onBeforeUnmount(() => {
   }
 }
 
-@keyframes contract-agent-typing-enter {
-  from {
-    opacity: 0;
-    transform: translateY(12px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (max-width: 900px) {
-  .contract-library {
-    grid-template-rows: minmax(600px, 1fr) 680px;
+  .contract-library.is-stacked {
+    /* 滚动视口不能由消息最小高度反向撑大，否则置顶预留会循环增长。 */
+    grid-template-rows: max(600px, calc(100dvh - 180px)) 680px;
     grid-template-columns: 1fr;
     height: auto;
   }
 
-  .contract-agent {
+  .contract-library.is-stacked .contract-agent {
     border: 0;
   }
 
-  .contract-agent::after {
+  .contract-library.is-stacked .contract-agent::after {
     top: auto;
     right: 0;
     bottom: 0;
@@ -2024,11 +2795,9 @@ onBeforeUnmount(() => {
     mask: none;
   }
 
-  .contract-agent__resize-handle {
+  .contract-library.is-stacked .contract-agent__resize-handle {
     display: none;
   }
-}
-
 @media (max-width: 640px) {
   .contract-library {
     grid-template-rows: minmax(560px, calc(100dvh - 126px)) 720px;
@@ -2070,8 +2839,8 @@ onBeforeUnmount(() => {
     width: min(220px, calc(100% - 26px));
   }
 
-  .contract-agent__messages {
-    padding: 64px 15px 20px;
+  .contract-agent__messages-content {
+    padding: 24px 15px 16px;
   }
 
   .contract-agent__empty {
@@ -2089,14 +2858,13 @@ onBeforeUnmount(() => {
   }
 
   .contract-agent__message.is-new-conversation-entry,
-  .contract-agent__message.is-message-entry,
-  .contract-agent__message--typing-entry {
+  .contract-agent__message.is-message-entry {
     opacity: 1;
     transform: none;
     animation: none;
   }
 
-  .contract-agent__typing i {
+  .contract-agent__thinking {
     animation: none;
   }
 

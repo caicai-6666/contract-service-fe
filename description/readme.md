@@ -34,7 +34,7 @@ description/
 └── features/                  面向用户的业务功能
     ├── contract-library.md    正式合同目录、筛选、预览与删除
     ├── contract-ingestion.md  合同提取、查重、审核校对与入库
-    └── agent-conversation.md  智能助手会话、消息与交互原型
+    └── agent-conversation.md  智能助手会话、消息与流式通信
 ```
 
 顶层只保留 `project.md`、`readme.md` 和 `documentation.md`。专题按主要职责归类：登录、鉴权、路由等跨业务能力进入 `platform/`；合同档案、处理流和智能助手等业务功能进入 `features/`。同一专题的接口、交互和验证说明放在一起，不因内容类型不同而重复拆分。

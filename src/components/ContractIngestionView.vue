@@ -14,6 +14,9 @@ import ExtractionAiControl from './ExtractionAiControl.vue'
 import ContractDateWheel from './ContractDateWheel.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
+import BatchExtractionDialog from './BatchExtractionDialog.vue'
+import { awaitsExtractionFollowup } from '../models/extractionEventLifecycle.js'
+import { getSelectedFileKind, convertImageFileToPdf } from '../services/local-file-pdf.js'
 import PdfWorker from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?worker'
 import RollingNumber from './RollingNumber.vue'
 import sleepyEmptyImage from '../assets/sleep.webp'
@@ -24,6 +27,7 @@ import {
   getCoreDefinitions,
   getDeduplicationCandidatePdf,
   getExtractionSnapshot,
+  getExtractionPdf,
   ingestExtractionRun,
   listExtractionRuns,
   retryExtractionStage,
@@ -34,6 +38,7 @@ defineOptions({ name: 'ContractIngestionView' })
 
 const props = defineProps({ active: { type: Boolean, default: true } })
 const emit = defineEmits(['visual-pause-change'])
+const batchExtractionOpen = ref(false)
 
 const stageOrder = ['detection', 'duplication', 'preprocessing', 'classification', 'naming', 'field', 'clause', 'retrieval']
 const PDF_COVER_MAX_RASTER_SIDE = 1600
@@ -50,7 +55,8 @@ const backendStageToLocal = {
   clause_extraction: 'clause',
   retrieval_preparation: 'retrieval',
 }
-const draftProducingStageCodes = new Set(['core_extraction', 'clause_extraction'])
+let awaitingExtractionFollowup = false
+let restoredCoverController = null
 const localStageToBackend = Object.fromEntries(
   Object.entries(backendStageToLocal).map(([backendCode, localId]) => [localId, backendCode]),
 )
@@ -786,6 +792,13 @@ function markResultUpdated() {
 }
 
 function stopExtractionNetwork() {
+  if (restoredCoverController) {
+    fileSelectionSequence += 1
+    coverReading.value = false
+  }
+  restoredCoverController?.abort()
+  restoredCoverController = null
+  awaitingExtractionFollowup = false
   streamGeneration += 1
   extractionRequestController?.abort()
   ingestionRequestController?.abort()
@@ -805,6 +818,14 @@ function closeCandidatePreview() {
   candidatePreviewUrl.value = ''
   candidatePreviewLabel.value = ''
   if (wasOpen) emit('visual-pause-change', false)
+}
+
+function previewInputPdf() {
+  if (!selectedFile.value) return
+  closeCandidatePreview()
+  candidatePreviewUrl.value = URL.createObjectURL(selectedFile.value)
+  candidatePreviewLabel.value = selectedFileName.value || '输入合同'
+  emit('visual-pause-change', true)
 }
 
 function presentDeduplicationReview(review) {
@@ -937,6 +958,7 @@ function normalizeProcessedDocument(document) {
     : null
 
   return {
+    fileId: typeof document.file_id === 'string' ? document.file_id : '',
     fileName: typeof document.file_name === 'string' && document.file_name.trim()
       ? document.file_name.trim()
       : '',
@@ -1159,6 +1181,7 @@ function applyExtractionSnapshot(snapshot, {
 } = {}) {
   const run = snapshot?.run
   if (!run?.run_id) return
+  awaitingExtractionFollowup = false
 
   currentRunId.value = run.run_id
   currentRunStatus.value = run.status || ''
@@ -1224,11 +1247,11 @@ async function refreshExtractionSnapshot(generation = streamGeneration) {
 }
 
 function scheduleStreamRecovery(generation, message = '') {
-  if (generation !== streamGeneration || !workflowRunning.value || reconnectTimer !== null) return
+  if (generation !== streamGeneration || (!workflowRunning.value && !awaitingExtractionFollowup) || reconnectTimer !== null) return
   if (message) workflowError.value = message
   reconnectTimer = window.setTimeout(async () => {
     reconnectTimer = null
-    if (generation !== streamGeneration || !workflowRunning.value) return
+    if (generation !== streamGeneration || (!workflowRunning.value && !awaitingExtractionFollowup)) return
     try {
       await refreshExtractionSnapshot(generation)
       if (generation === streamGeneration && workflowRunning.value) subscribeToExtractionEvents(generation)
@@ -1244,6 +1267,7 @@ async function handleExtractionEvent(frame, generation) {
   if (generation !== streamGeneration || frame.event === 'heartbeat') return
   const event = frame.data
   if (!event || typeof event !== 'object') return
+  awaitingExtractionFollowup = awaitsExtractionFollowup(event)
 
   const sequence = Number(frame.id || event.sequence)
   if (Number.isInteger(sequence) && sequence >= 0) lastEventSequence = sequence
@@ -1310,11 +1334,8 @@ async function handleExtractionEvent(frame, generation) {
     eventStreamController?.abort()
   }
 
-  const awaitingDraftUpdate = event.event_type === 'stage.completed'
-    && draftProducingStageCodes.has(event.stage?.code)
-  // 后端在结果阶段完成事件之后才发布 draft.updated；此处若因 ready 状态立即断流，
-  // 首次处理将错过权威草稿，只能在刷新页面后恢复条款或 Core。
-  if (!workflowRunning.value && !uploadInProgress.value && !awaitingDraftUpdate) {
+  // 不能只根据阶段事件中的 overall_status 断流，否则会漏掉后续候选或草稿。
+  if (!workflowRunning.value && !uploadInProgress.value && !awaitingExtractionFollowup) {
     eventStreamController?.abort()
   }
 }
@@ -1331,7 +1352,7 @@ async function subscribeToExtractionEvents(generation = streamGeneration) {
       lastEventId: lastEventSequence,
       onEvent: (frame) => handleExtractionEvent(frame, generation),
     })
-    if (generation === streamGeneration && workflowRunning.value) {
+    if (generation === streamGeneration && (workflowRunning.value || awaitingExtractionFollowup)) {
       scheduleStreamRecovery(generation, '处理事件连接已中断，正在恢复')
     }
   } catch (error) {
@@ -1839,6 +1860,7 @@ async function restoreExtractionRun(run) {
     })
     presentRestoredRunDetail(snapshot)
     if (workflowRunning.value) subscribeToExtractionEvents(generation)
+    if (!canKeepLocalInput) void restoreInputCover(processedDocument.value, generation)
   } catch (error) {
     if (error?.name === 'AbortError') return
     runsRestoreErrorId.value = run.run_id
@@ -1851,6 +1873,30 @@ async function restoreExtractionRun(run) {
       runRestoreController = null
       runsRestoringId.value = ''
     }
+  }
+}
+
+async function restoreInputCover(document, generation) {
+  if (!document?.fileId) return
+  const controller = new AbortController()
+  restoredCoverController?.abort()
+  restoredCoverController = controller
+  const sequence = fileSelectionSequence
+  const isCurrent = () => restoredCoverController === controller
+    && !controller.signal.aborted && generation === streamGeneration && sequence === fileSelectionSequence
+  coverReading.value = true
+  try {
+    const blob = await getExtractionPdf(document.fileId, { signal: controller.signal })
+    if (!isCurrent()) return
+    const file = new File([blob], normalizePdfFileName(document.fileName), { type: 'application/pdf' })
+    selectedFile.value = file
+    await readPdfCover(file, sequence)
+  } catch (error) {
+    if (!isCurrent() || error?.name === 'AbortError') return
+    fileSelectionError.value = error?.message || '临时 PDF 封面恢复失败'
+  } finally {
+    if (isCurrent()) coverReading.value = false
+    if (restoredCoverController === controller) restoredCoverController = null
   }
 }
 
@@ -1956,130 +2002,11 @@ function activateInputNode() {
   requestFileSelection()
 }
 
-function getSelectedFileKind(file) {
-  const fileName = file.name.toLowerCase()
-  if (file.type === 'application/pdf' || fileName.endsWith('.pdf')) return 'pdf'
-
-  const supportedImageTypes = new Set([
-    'image/png',
-    'image/jpeg',
-    'image/webp',
-    'image/gif',
-    'image/bmp',
-    'image/avif',
-  ])
-  const supportedImageExtension = /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(fileName)
-  return supportedImageTypes.has(file.type) || supportedImageExtension ? 'image' : ''
-}
-
-function joinBinaryChunks(chunks) {
-  const totalLength = chunks.reduce((total, chunk) => total + chunk.length, 0)
-  const result = new Uint8Array(totalLength)
-  let offset = 0
-  chunks.forEach((chunk) => {
-    result.set(chunk, offset)
-    offset += chunk.length
-  })
-  return result
-}
-
-function createSinglePagePdf(jpegBytes, imageWidth, imageHeight) {
-  const encoder = new TextEncoder()
-  const chunks = []
-  const objectOffsets = [0]
-  let byteLength = 0
-
-  const append = (value) => {
-    const bytes = typeof value === 'string' ? encoder.encode(value) : value
-    chunks.push(bytes)
-    byteLength += bytes.length
-  }
-  const appendObject = (objectId, body) => {
-    objectOffsets[objectId] = byteLength
-    append(`${objectId} 0 obj\n${body}\nendobj\n`)
-  }
-  const formatNumber = (value) => Number(value.toFixed(3)).toString()
-
-  const pointsPerPixel = 72 / 96
-  const naturalPageWidth = imageWidth * pointsPerPixel
-  const naturalPageHeight = imageHeight * pointsPerPixel
-  const pageScale = Math.min(1, 1440 / Math.max(naturalPageWidth, naturalPageHeight))
-  const pageWidth = naturalPageWidth * pageScale
-  const pageHeight = naturalPageHeight * pageScale
-  const contentStream = `q\n${formatNumber(pageWidth)} 0 0 ${formatNumber(pageHeight)} 0 0 cm\n/Im0 Do\nQ\n`
-  const contentBytes = encoder.encode(contentStream)
-
-  append('%PDF-1.4\n')
-  appendObject(1, '<< /Type /Catalog /Pages 2 0 R >>')
-  appendObject(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>')
-  appendObject(
-    3,
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${formatNumber(pageWidth)} ${formatNumber(pageHeight)}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>`,
-  )
-
-  objectOffsets[4] = byteLength
-  append(`4 0 obj\n<< /Type /XObject /Subtype /Image /Width ${imageWidth} /Height ${imageHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`)
-  append(jpegBytes)
-  append('\nendstream\nendobj\n')
-  appendObject(5, `<< /Length ${contentBytes.length} >>\nstream\n${contentStream}endstream`)
-
-  const xrefOffset = byteLength
-  append('xref\n0 6\n0000000000 65535 f \n')
-  for (let objectId = 1; objectId <= 5; objectId += 1) {
-    append(`${String(objectOffsets[objectId]).padStart(10, '0')} 00000 n \n`)
-  }
-  append(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`)
-
-  return joinBinaryChunks(chunks)
-}
-
-function canvasToJpeg(canvas) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) resolve(blob)
-      else reject(new Error('Canvas JPEG encoding failed'))
-    }, 'image/jpeg', 0.94)
-  })
-}
-
 async function convertImageToPdf(file, selectionSequence) {
-  const imageUrl = URL.createObjectURL(file)
-
   try {
-    const image = await new Promise((resolve, reject) => {
-      const sourceImage = new Image()
-      sourceImage.onload = () => resolve(sourceImage)
-      sourceImage.onerror = () => reject(new Error('Image decoding failed'))
-      sourceImage.src = imageUrl
-    })
+    const pdfFile = await convertImageFileToPdf(file)
     if (selectionSequence !== fileSelectionSequence) return
-    if (!image.naturalWidth || !image.naturalHeight) throw new Error('Invalid image dimensions')
-
-    const maxRasterSide = 4096
-    const rasterScale = Math.min(1, maxRasterSide / Math.max(image.naturalWidth, image.naturalHeight))
-    const imageWidth = Math.max(1, Math.round(image.naturalWidth * rasterScale))
-    const imageHeight = Math.max(1, Math.round(image.naturalHeight * rasterScale))
-    const conversionCanvas = document.createElement('canvas')
-    conversionCanvas.width = imageWidth
-    conversionCanvas.height = imageHeight
-    const context = conversionCanvas.getContext('2d', { alpha: false })
-    if (!context) throw new Error('Canvas is unavailable')
-
-    context.fillStyle = '#fff'
-    context.fillRect(0, 0, imageWidth, imageHeight)
-    context.drawImage(image, 0, 0, imageWidth, imageHeight)
-    const jpegBlob = await canvasToJpeg(conversionCanvas)
-    const jpegBytes = new Uint8Array(await jpegBlob.arrayBuffer())
-    const pdfBytes = createSinglePagePdf(jpegBytes, imageWidth, imageHeight)
-    if (selectionSequence !== fileSelectionSequence) return
-
-    const extensionIndex = file.name.lastIndexOf('.')
-    const baseName = (extensionIndex > 0 ? file.name.slice(0, extensionIndex) : file.name).trim()
-      || 'contract-image'
-    selectedFile.value = new File([pdfBytes], `${baseName}.pdf`, {
-      type: 'application/pdf',
-      lastModified: file.lastModified,
-    })
+    selectedFile.value = pdfFile
     imageConversionStatus.value = 'converted'
     await readPdfCover(selectedFile.value, selectionSequence)
   } catch {
@@ -2089,8 +2016,6 @@ async function convertImageToPdf(file, selectionSequence) {
     fileSelectionError.value = '图片转换为 PDF 失败'
     drawCoverFallback(selectedFileBadge.value)
     coverReading.value = false
-  } finally {
-    URL.revokeObjectURL(imageUrl)
   }
 }
 
@@ -3385,6 +3310,12 @@ onBeforeUnmount(() => {
           <span>新建提取</span>
         </button>
       </div>
+      <div class="contract-action-pedestal">
+        <button type="button" class="contract-new-trigger" @click="batchExtractionOpen = true">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h12v14H8zM4 7v14h12M11 8h6M11 12h6" /></svg>
+          <span>批量提取</span>
+        </button>
+      </div>
     </div>
 
     <div
@@ -3682,12 +3613,13 @@ onBeforeUnmount(() => {
                 <small>支持 PDF 或单张图片</small>
                 </template>
                 <canvas
-                  v-if="selectedSourceFile"
+                  v-if="selectedSourceFile || isRestoredRun"
                   ref="coverCanvas"
                   class="workflow-upload-card__cover"
+                  :class="{ 'is-visible': coverRendered && !coverReading }"
                   :aria-label="`${selectedFileName} 第一页封面`"
                 ></canvas>
-                <div v-if="isRestoredRun" class="workflow-input-node__restored" aria-hidden="true">
+                <div v-if="isRestoredRun && !coverRendered && !coverReading" class="workflow-input-node__restored">
                   <span>
                     <svg viewBox="0 0 42 50">
                       <path d="M9 3h16l8 8v36H9z" />
@@ -3696,12 +3628,12 @@ onBeforeUnmount(() => {
                     <i></i>
                   </span>
                   <strong>任务已恢复</strong>
-                  <small>已同步后台文件信息</small>
+                  <small>{{ fileSelectionError || '已同步后台文件信息' }}</small>
                 </div>
                 <div
-                  v-if="selectedSourceFile"
+                  v-if="selectedSourceFile || (isRestoredRun && (coverReading || coverRendered))"
                   class="workflow-input-node__cover-loading"
-                  :class="{ 'is-hidden': coverRendered }"
+                  :class="{ 'is-hidden': coverRendered && !coverReading }"
                   aria-hidden="true"
                 >
                   <span><i></i><i></i><i></i></span>
@@ -4046,6 +3978,14 @@ onBeforeUnmount(() => {
               <dd>{{ filePreparationLabel }}</dd>
             </div>
           </dl>
+          <div class="ingestion-detail__preview-slot">
+            <Transition name="ingestion-preview" appear>
+              <button v-if="selectedFile" type="button" class="ingestion-detail__preview-pdf" @click="previewInputPdf">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8zM14 3v5h5" /><circle cx="11" cy="13" r="3" /><path d="m13.2 15.2 2.3 2.3" /></svg>
+                <span>预览 PDF</span>
+              </button>
+            </Transition>
+          </div>
           <div class="ingestion-detail__ai-control" aria-live="polite">
             <Transition name="ingestion-ai-control" appear>
               <ExtractionAiControl
@@ -4734,6 +4674,8 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </Transition>
+
+    <BatchExtractionDialog :open="active && batchExtractionOpen" @close="batchExtractionOpen = false" @created="refreshExtractionRuns({ showLoader: false })" @tasks="runsPanelOpen || toggleRunsPanel()" />
 
     <PdfPreviewOverlay
       :open="active && Boolean(candidatePreviewUrl)"
@@ -6087,11 +6029,20 @@ onBeforeUnmount(() => {
 }
 
 .workflow-upload-card__cover {
+  opacity: 0;
   display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
   background: #fff;
+}
+
+.workflow-upload-card__cover.is-visible {
+  opacity: 1;
+  transition: opacity .6s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .workflow-upload-card__cover.is-visible { transition: none; }
 }
 
 .workflow-upload-card__footer {
@@ -8037,6 +7988,42 @@ onBeforeUnmount(() => {
   width: 100%;
   text-align: right;
 }
+
+.ingestion-detail__preview-slot {
+  height: 42px;
+  margin-top: 20px;
+}
+.ingestion-preview-enter-active,
+.ingestion-preview-leave-active { transition: opacity .4s ease; }
+.ingestion-detail__preview-pdf.ingestion-preview-enter-from,
+.ingestion-detail__preview-pdf.ingestion-preview-leave-to { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .ingestion-detail__preview-pdf.ingestion-preview-enter-active,
+  .ingestion-detail__preview-pdf.ingestion-preview-leave-active { transition: none; }
+}
+
+.ingestion-detail__preview-pdf {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 16px;
+  color: #446354;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  background: linear-gradient(145deg, #fff, #f0f5f1);
+  border: 1px solid #dce6df;
+  border-radius: 13px;
+  box-shadow: 0 3px 9px #304c3b08;
+  cursor: pointer;
+  transition: background .2s, box-shadow .2s, opacity .4s ease;
+}
+.ingestion-detail__preview-pdf:hover { background: #edf4ee; box-shadow: 0 4px 12px #304c3b12; }
+.ingestion-detail__preview-pdf:focus-visible { outline: 2px solid #719583; outline-offset: 3px; }
+.ingestion-detail__preview-pdf svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
 .ingestion-detail__ai-control {
   position: relative;

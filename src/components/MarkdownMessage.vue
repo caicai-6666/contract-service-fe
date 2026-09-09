@@ -1,12 +1,76 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import MarkdownIt from 'markdown-it'
+import { createStreamText } from '../models/streamText.js'
 
 const props = defineProps({
   content: {
     type: String,
     required: true,
   },
+  streamState: { type: String, default: '' },
+  animate: { type: Boolean, default: true },
+  stabilizeHeight: { type: Boolean, default: false },
+})
+
+const displayedContent = ref(props.content)
+const contentRef = ref(null)
+const reservedHeight = ref(0)
+let heightObserver = null
+let measuredWidth = 0
+let reserveStreamHeight = props.stabilizeHeight && props.streamState === 'streaming'
+
+function measureContentHeight() {
+  const element = contentRef.value
+  if (!element || !props.stabilizeHeight) return
+  if (props.streamState === 'streaming') reserveStreamHeight = true
+  if (!reserveStreamHeight) return
+  const { width, height } = element.getBoundingClientRect()
+  if (!width) return
+  // Markdown 重排只能扩展本轮占位；缩短的部分成为后续文字可复用的缓冲。
+  // 用户调整栏宽时重新测量，避免保留窄栏时的过大空白。
+  if (Math.abs(width - measuredWidth) > 1) reservedHeight.value = 0
+  measuredWidth = width
+  reservedHeight.value = Math.max(reservedHeight.value, Math.ceil(height) + 24)
+}
+const emit = defineEmits(['display-state'])
+function reportDisplayState() {
+  emit('display-state', { text: displayedContent.value, complete: displayedContent.value === props.content })
+}
+watch(() => [displayedContent.value, props.content, props.streamState], reportDisplayState, { flush: 'post' })
+let revealer = null
+let motionPreference = null
+let wasStreaming = props.streamState === 'streaming'
+
+function updateDisplay() {
+  if (!revealer) { displayedContent.value = props.content; return }
+  const smooth = props.animate && !motionPreference?.matches
+    && (props.streamState === 'streaming' || (props.streamState === 'completed' && wasStreaming))
+  revealer.update(props.content, { immediate: !smooth })
+  wasStreaming = props.streamState === 'streaming'
+}
+
+onMounted(() => {
+  if (props.stabilizeHeight) {
+    heightObserver = new ResizeObserver(measureContentHeight)
+    heightObserver.observe(contentRef.value)
+    measureContentHeight()
+  }
+  reportDisplayState()
+  motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)')
+  revealer = createStreamText({
+    initial: displayedContent.value,
+    onChange: (text) => { displayedContent.value = text },
+    requestFrame: (callback) => window.requestAnimationFrame(callback),
+    cancelFrame: (id) => window.cancelAnimationFrame(id),
+  })
+  motionPreference.addEventListener('change', updateDisplay)
+})
+watch(() => [props.content, props.streamState, props.animate], updateDisplay)
+onBeforeUnmount(() => {
+  heightObserver?.disconnect()
+  revealer?.stop()
+  motionPreference?.removeEventListener('change', updateDisplay)
 })
 
 const markdown = new MarkdownIt({
@@ -27,11 +91,24 @@ markdown.renderer.rules.link_open = (tokens, index, options, environment, render
     : renderer.renderToken(tokens, index, options)
 }
 
-const renderedContent = computed(() => markdown.render(props.content))
+const renderedBlocks = computed(() => {
+  const environment = {}
+  const tokens = markdown.parse(displayedContent.value, environment)
+  const blocks = []
+  for (const token of tokens) {
+    if (token.level === 0 && token.nesting !== -1) blocks.push([])
+    blocks.at(-1)?.push(token)
+  }
+  return blocks.map((block) => markdown.renderer.render(block, markdown.options, environment))
+})
 </script>
 
 <template>
-  <div class="markdown-message" v-html="renderedContent"></div>
+  <div class="markdown-message" :style="reservedHeight ? { minHeight: `${reservedHeight}px` } : undefined">
+    <div ref="contentRef" class="markdown-message__content">
+      <div v-for="(html, index) in renderedBlocks" :key="index" class="markdown-message__block" v-html="html"></div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
@@ -43,11 +120,14 @@ const renderedContent = computed(() => markdown.render(props.content))
   overflow-wrap: anywhere;
 }
 
-.markdown-message :deep(> :first-child) {
+.markdown-message__block { display: contents; }
+.markdown-message__content { display: flow-root; }
+
+.markdown-message__content :deep(> .markdown-message__block:first-child > :first-child) {
   margin-top: 0;
 }
 
-.markdown-message :deep(> :last-child) {
+.markdown-message__content :deep(> .markdown-message__block:last-child > :last-child) {
   margin-bottom: 0;
 }
 

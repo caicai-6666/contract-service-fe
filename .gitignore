@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# 本地测试文件不纳入版本控制
+/tests/
+
 # 由 scripts/sync-pdfjs-assets.mjs 从 pdfjs-dist 自动生成
 /public/pdfjs/
 

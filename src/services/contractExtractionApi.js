@@ -190,6 +190,27 @@ export async function getDeduplicationCandidatePdf(fileUri, { signal } = {}) {
   return response.blob()
 }
 
+export async function getExtractionPdf(fileId, { signal } = {}) {
+  if (typeof fileId !== 'string' || !/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(fileId)) {
+    throw new ContractApiError('提取任务缺少有效的 PDF 文件标识')
+  }
+  const response = await contractApiFetch(
+    `${CONTRACT_API_BASE_PATH}/resource/extraction-pdf/${encodeURIComponent(fileId)}`,
+    { signal, cache: 'no-store' },
+  )
+  if (!response.ok) {
+    const payload = await responsePayload(response)
+    throw new ContractApiError(responseErrorMessage(payload,
+      response.status === 404 ? '临时 PDF 已释放或不可访问，无法恢复封面' : `临时 PDF 获取失败（${response.status}）`,
+    ), { status: response.status, payload })
+  }
+  const blob = await response.blob()
+  if (!blob.size || blob.type.split(';')[0].trim().toLowerCase() !== 'application/pdf') {
+    throw new ContractApiError('临时 PDF 返回内容无效')
+  }
+  return blob
+}
+
 function parseSseFrame(frame) {
   let id = ''
   let event = 'message'

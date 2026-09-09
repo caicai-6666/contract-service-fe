@@ -2,11 +2,13 @@
 import PdfLoadingAnimation from './PdfLoadingAnimation.vue'
 import { computed, nextTick, ref, watch } from 'vue'
 const props = defineProps({
+  teleportTarget: { default: 'body' },
   open: { type: Boolean, default: false },
   src: { type: String, default: '' },
   label: { type: String, default: 'PDF 文档' },
   loading: { type: Boolean, default: false },
   error: { type: String, default: '' },
+  retryable: { type: Boolean, default: true },
   showDelete: { type: Boolean, default: false },
   showToolbar: { type: Boolean, default: false },
   deleting: { type: Boolean, default: false },
@@ -44,7 +46,7 @@ defineEmits(['close', 'retry', 'delete'])
 </script>
 
 <template>
-  <Teleport to="body">
+  <Teleport :to="teleportTarget">
     <div
       class="pdf-preview-glass"
       :class="{ 'is-active': open }"
@@ -59,7 +61,7 @@ defineEmits(['close', 'retry', 'delete'])
         role="dialog"
         aria-modal="true"
         :aria-label="`预览 ${label}`"
-        @keydown.esc.stop="deleteConfirmation ? cancelDelete() : !deleting && $emit('close')"
+        @keydown.esc.prevent.stop="deleteConfirmation ? cancelDelete() : !deleting && $emit('close')"
       >
         <div class="pdf-preview__viewer">
           <iframe
@@ -79,7 +81,7 @@ defineEmits(['close', 'retry', 'delete'])
             <span v-if="waitingForPdf" role="status">正在加载 PDF…</span>
             <template v-else-if="error">
               <span role="alert">{{ error }}</span>
-              <button type="button" @click="$emit('retry')">重新加载</button>
+              <button v-if="retryable" type="button" @click="$emit('retry')">重新加载</button>
             </template>
           </div>
           </Transition>

@@ -702,15 +702,21 @@ watch([documentsLoading, documentsError], () => {
 .contract-archive__time {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  overflow-x: auto;
   gap: 12px 20px;
   padding: 16px 0;
   border-top: 1px solid #dce4de;
   border-bottom: 1px solid #dce4de;
 }
 .contract-archive__time-label {
+  flex: none;
   color: #677b6e;
   font-size: 12px;
+}
+.contract-archive__time :deep(.archive-date-filter) {
+  flex: 0 0 340px;
 }
 /* From Uiverse.io by abdo_6865；两段式紧凑尺寸，保留原版选中配色。 */
 .contract-archive__reviewer-scope {
