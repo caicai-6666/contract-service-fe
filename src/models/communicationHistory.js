@@ -1,9 +1,24 @@
-import { TERMINAL_TURN_STATUSES } from './communicationTurn.js'
+import { TERMINAL_TURN_STATUSES, turnDisplayMessages, interruptionPermission } from './communicationTurn.js'
+import { modelHistoryEvents } from './communicationHistoryEvents.js'
 
 const invalid = () => { throw new Error('历史轨迹格式无效，无法完整展示，请重试或联系管理员') }
 const text = (value) => typeof value === 'string'
 const id = (value) => text(value) && value.length > 0
 const time = (value) => Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime())
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function attachment(file) {
+  if (!file || !id(file.file_name) || !id(file.file_id)) return invalid()
+  const result = { name: file.file_name, fileId: file.file_id, filePath: file.file_path }
+  // 旧记录不补造准入结论；新记录的空路径是正常业务状态，而非历史结构错误。
+  if (!Object.hasOwn(file, 'admission')) {
+    if (!id(file.file_path)) return invalid()
+    return result
+  }
+  if (!uuid.test(file.file_id) || !['pending', 'accepted', 'unavailable'].includes(file.admission)) return invalid()
+  if (file.admission === 'accepted' ? file.file_path !== `/${file.file_id}.pdf` : file.file_path !== null) return invalid()
+  return { ...result, admission: file.admission }
+}
 
 function references(items) {
   if (!Array.isArray(items)) return invalid()
@@ -25,6 +40,7 @@ export function modelCommunicationHistory(data, conversationId) {
   for (const record of data.records) {
     if (!record || !id(record.record_id) || ids.has(record.record_id) || record.kind !== 'task'
       || !Number.isSafeInteger(record.sequence) || record.sequence <= previous || !time(record.created_at)
+      || !(record.activated_at == null || time(record.activated_at))
       || !(record.turn_id === null || id(record.turn_id))
       || !(record.status === null || TERMINAL_TURN_STATUSES.has(record.status) || ['pending_activation', 'processing'].includes(record.status))
       || !(record.processing_duration_ms === null || (Number.isSafeInteger(record.processing_duration_ms) && record.processing_duration_ms >= 0))) return invalid()
@@ -34,14 +50,27 @@ export function modelCommunicationHistory(data, conversationId) {
     if (turnIds.has(turnId)) return invalid()
     turnIds.add(turnId)
     const { input, trace } = record.payload ?? {}
-    if (!input || !(input.text === null || text(input.text)) || !Array.isArray(input.files) || !Array.isArray(trace)) return invalid()
-    const attachments = input.files.map((file) => {
-      if (!file || !id(file.file_name) || !id(file.file_id) || !id(file.file_path)) return invalid()
-      return { name: file.file_name, fileId: file.file_id, filePath: file.file_path }
-    })
-    const turn = { turn_id: turnId, status: record.status, history: true, messages: [], processing_duration_ms: record.processing_duration_ms }
+    const usesEvents = Object.hasOwn(record.payload ?? {}, 'events')
+    if (!input || !(input.text === null || text(input.text)) || !Array.isArray(input.files) || (!usesEvents && !Array.isArray(trace))) return invalid()
+    const attachments = input.files.map(attachment)
+    const canInterrupt = interruptionPermission(record)
+    const turn = { turn_id: turnId, status: record.status, history: true, messages: [], processing_duration_ms: record.processing_duration_ms,
+      can_interrupt: canInterrupt,
+      activated_at: record.activated_at == null ? null : new Date(record.activated_at).toISOString() }
     const common = { turnId, fromHistory: true }
     messages.push({ ...common, id: `history:${record.record_id}:input`, role: 'user', content: input.text ?? '', attachments, turnStatus: record.status })
+    if (usesEvents) {
+      const restored = modelHistoryEvents(record, conversationId)
+      restored.can_interrupt = canInterrupt
+      messages.push(...turnDisplayMessages(restored).map(message => ({
+        ...common, id: `${turnId}:${message.message_id}`, role: 'assistant', content: message.text,
+        messageKind: message.message_kind, status: message.status, references: message.references,
+        settledProgress: message.progress, progressActive: message.progressActive,
+      })))
+      if (restored.error) messages.push({ ...common, id: `${turnId}:error`, role: 'assistant', content: restored.error.message, historyError: true, messageKind: 'intermediate' })
+      turns.push(restored)
+      continue
+    }
     const calls = new Map()
     trace.forEach((entry, index) => {
       if (!entry || entry.sequence !== index + 1) return invalid()
@@ -72,5 +101,11 @@ export function mergeCommunicationHistory(history, localMessages, localTurns) {
   // 本页实际执行的轮次在停止后仍保留实时结果，不能因状态变为终态便被较早的归档投影替换。
   const live = new Set(localTurns.filter((turn) => turn.localSession || (!TERMINAL_TURN_STATUSES.has(turn.status) && !turn.unavailable)).map((turn) => turn.turn_id))
   const archived = new Set((history?.turns ?? []).filter((turn) => !live.has(turn.turn_id)).map((turn) => turn.turn_id))
-  return [...(history?.messages ?? []).filter((message) => archived.has(message.turnId)), ...localMessages.filter((message) => !archived.has(message.turnId))]
+  const historyUsers = new Map((history?.messages ?? []).filter(message => message.role === 'user').map(message => [message.turnId, message]))
+  const currentMessages = localMessages.filter(message => !archived.has(message.turnId)).map(message => {
+    const historical = message.role === 'user' && historyUsers.get(message.turnId)
+    // 本地消息正文与 SSE 优先，但附件准入必须跟随最新 open/refresh，不能停留在初次上传状态。
+    return historical ? { ...message, attachments: historical.attachments } : message
+  })
+  return [...(history?.messages ?? []).filter((message) => archived.has(message.turnId)), ...currentMessages]
 }

@@ -14,11 +14,16 @@ import MarkdownMessage from './MarkdownMessage.vue'
 import ContractArchivePanel from './ContractArchivePanel.vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
 import DeleteConversationDialog from './DeleteConversationDialog.vue'
+import onlineSearchImage from '../assets/online-search.webp'
+import localSearchImage from '../assets/local-search.webp'
+import { taskProgressPresentation } from '../models/communicationProgress.js'
 import { getSelectedFileKind, convertImageFileToPdf } from '../services/local-file-pdf.js'
+import { clipboardFiles } from '../services/clipboardFiles.js'
+import { canPreviewCommunicationFile, getCommunicationPdf } from '../services/communicationResourceApi.js'
 import { createCommunicationSession, newConversation } from '../services/communicationSession.js'
 import { createMessageScrollFollower } from '../services/messageScrollFollower.js'
 import { createHistoryPullRefresh } from '../services/historyPullRefresh.js'
-import { validateTurnInput, turnTimingLabel, hasStartedFinal, shouldCollapseTurnProcess, copyableTurnMessage } from '../models/communicationTurn.js'
+import { validateTurnInput, turnTimingLabel, turnStartTime, hasStartedFinal, shouldCollapseTurnProcess, copyableTurnMessage, canInterruptTurn } from '../models/communicationTurn.js'
 defineOptions({ name: 'ContractLibraryView' })
 const props = defineProps({ active: { type: Boolean, default: true } })
 
@@ -45,6 +50,8 @@ let attachmentSelectionDisposed = false
 const attachmentPreviewFile = ref(null)
 const attachmentPreviewUrl = ref('')
 const attachmentPreviewError = ref('')
+const attachmentPreviewLoading = ref(false)
+let attachmentPreviewRequest = null
 const activeConversation = computed({
   get: () => Math.max(0, conversations.value.findIndex((c) => c.id === communication.selectedConversationId.value)),
   set: (index) => { communication.selectedConversationId.value = conversations.value[index]?.id },
@@ -82,6 +89,8 @@ const displayTurns = computed(() => {
   return [...(currentConversation.value.history?.turns ?? []).filter((turn) => archived.has(turn.turn_id)), ...currentConversation.value.turns.filter((turn) => !archived.has(turn.turn_id))]
 })
 const messageDisplayStates = ref(new Map())
+const startTimeReference = ref(Date.now())
+const turnStartTimes = computed(() => new Map(displayTurns.value.map(turn => [turn.turn_id, turnStartTime(turn, startTimeReference.value)])))
 function updateMessageDisplay(messageId, state) {
   messageDisplayStates.value.set(messageId, state)
 }
@@ -132,13 +141,16 @@ function toggleTurnProcess(turnId) {
   expandedTurnProcesses.value = expanded
 }
 
+const progressImages = { 'online-search': onlineSearchImage, 'local-search': localSearchImage }
+const thinkingActivity = { type: 'thinking', text: '正在思考', thinking: true }
 const tailActivity = computed(() => {
-  if (currentConversation.value.submitting) return { text: '正在思考', thinking: true }
+  if (currentConversation.value.submitting) return thinkingActivity
   if (!replying.value || ['recovering', 'disconnected'].includes(currentTurn.value?.connection)) return null
   if (hasStartedFinal(currentTurn.value)) return null
-  const progress = currentTurn.value?.active_progress?.message
-  if (progress) return { text: progress, thinking: false }
-  if (!messages.value.some((message) => message.status === 'streaming')) return { text: '正在思考', thinking: true }
+  const progress = currentTurn.value?.active_progress
+  // 检索状态从开始就留在消息序列中，结束只变灰，不在尾部再渲染一份。
+  if (progress) return progress.type === 'thinking' ? thinkingActivity : null
+  if (!messages.value.some((message) => message.status === 'streaming')) return thinkingActivity
   return null
 })
 const processingClock = ref(Date.now())
@@ -161,9 +173,11 @@ function messageTimingLabel(message) {
   if (turn?.history && turn.processing_duration_ms === null && turn.status === 'cancelled') return '已手动停止'
   return turnTimingLabel(turn, processingClock.value)
 }
-const composerBusy = computed(() => !conversationVisible.value || convertingAttachments.value || currentConversation.value.submitting || currentConversation.value.cancelling || currentConversation.value.deleting || currentConversation.value.renaming)
-const stopMode = computed(() => replying.value && !prompt.value.trim() && !selectedAttachments.value.length)
-const turnLabels = { pending_activation: '正在连接', processing: '正在处理', completed: '已完成', cancelled: '已终止', superseded: '已被新问题替代', rejected: '本轮未通过检查', failed: '本轮处理失败', expired: '轮次激活已超时，请重新发送' }
+const composerBusy = computed(() => !conversationVisible.value || convertingAttachments.value || currentConversation.value.cancelling || currentConversation.value.deleting || currentConversation.value.renaming)
+const taskPending = computed(() => currentConversation.value.submitting || replying.value)
+const stopMode = computed(() => taskPending.value && !prompt.value.trim() && !selectedAttachments.value.length)
+const canInterrupt = computed(() => !currentConversation.value.submitting && !currentConversation.value.cancelling && canInterruptTurn(currentTurn.value))
+const turnLabels = { failed: '本轮处理失败', expired: '轮次激活已超时，请重新发送' }
 const historyItems = computed(() => conversations.value.map((conversation) => conversation.name))
 const questionMessages = computed(() => messages.value.filter((message) => message.role === 'user'))
 
@@ -428,11 +442,19 @@ async function submitPrompt() {
     content,
     attachments: files.map((file) => ({ name: file.name, size: file.size, type: file.type })),
   }
-  if (conversation.replying || conversation.queue.length) {
+  if (conversation.submitting || conversation.replying || conversation.queue.length) {
     communication.enqueue(conversation, content, files, userMessage)
     clearComposerDraft()
     return
   }
+  if (isInitialMessage) {
+    initialMessageId.value = userMessage.id
+    window.clearTimeout(initialMessageTimer)
+    initialMessageTimer = window.setTimeout(() => {
+      if (initialMessageId.value === userMessage.id) initialMessageId.value = null
+    }, 1000)
+  } else markMessageEntering(userMessage.id)
+  clearComposerDraft()
   try {
     const turn = await communication.submit(conversation, content, files, userMessage)
     if (!turn) return
@@ -440,19 +462,17 @@ async function submitPrompt() {
       if (isNewConversation && !conversation.customName) conversation.name = createConversationTitle(content, files)
       if (!conversations.value.some((c) => !c.registered)) conversations.value.unshift(newConversation())
       activeConversation.value = conversations.value.findIndex((item) => item.id === conversation.id)
-      initialMessageId.value = userMessage.id
-      window.clearTimeout(initialMessageTimer)
-      initialMessageTimer = window.setTimeout(() => {
-        if (initialMessageId.value === userMessage.id) initialMessageId.value = null
-      }, 1000)
-    } else markMessageEntering(userMessage.id)
-    clearComposerDraft()
+    }
     communication.persist()
     if (isNewConversation) {
       void communication.refreshConversations()
       void communication.loadHistory(conversation)
     }
   } catch (error) {
+    if (currentConversation.value === conversation && !prompt.value && !selectedAttachments.value.length) {
+      prompt.value = content
+      selectedAttachments.value = files
+    }
     if (error.name !== 'AbortError') showAttachmentNotice('消息未发送', error.message)
   }
 }
@@ -473,6 +493,7 @@ async function steerQueuedMessage(item) {
 }
 
 async function stopReply() {
+  if (!canInterrupt.value || composerBusy.value) return
   const conversation = currentConversation.value
   const follow = messageScrollFollower?.isFollowing()
   messageScrollFollower?.pause()
@@ -532,7 +553,23 @@ async function handleAttachmentChange(event) {
   const files = Array.from(event.target.files ?? [])
   // 清空原生选择值，移除后仍可再次选择同一文件。
   event.target.value = ''
-  if (convertingAttachments.value || !files.length) return
+  await addAttachments(files)
+}
+
+function handleComposerPaste(event) {
+  const files = clipboardFiles(event.clipboardData)
+  if (!files.length) return
+  // 混合粘贴保留浏览器原生的文字插入、选区替换与撤销行为，不解析 HTML 或本地路径。
+  if (!event.clipboardData.getData('text/plain')) event.preventDefault()
+  void addAttachments(files)
+}
+
+async function addAttachments(files) {
+  if (!files.length) return
+  if (composerBusy.value || restoring.value) {
+    showAttachmentNotice('暂时无法添加附件', '请等待当前操作完成后重新粘贴或选择文件')
+    return
+  }
   convertingAttachments.value = true
   try {
     // 逐份处理，避免多张大图同时解码造成内存峰值。
@@ -578,17 +615,40 @@ function showAttachmentNotice(name, message) {
 }
 
 function removeAttachment(index) {
-  if (currentConversation.value.submitting) return
   if (selectedAttachments.value[index] === attachmentPreviewFile.value) closeAttachmentPreview()
   selectedAttachments.value.splice(index, 1)
 }
 
 function closeAttachmentPreview() {
+  attachmentPreviewRequest?.abort()
+  attachmentPreviewRequest = null
+  attachmentPreviewLoading.value = false
   attachmentPreviewFile.value = null
   if (attachmentPreviewUrl.value) URL.revokeObjectURL(attachmentPreviewUrl.value)
   attachmentPreviewUrl.value = ''
   attachmentPreviewError.value = ''
 }
+
+async function previewSentAttachment(file, message) {
+  if (!canPreviewCommunicationFile(file, message.turnStatus)) return
+  closeAttachmentPreview()
+  const controller = new AbortController()
+  attachmentPreviewRequest = controller
+  attachmentPreviewFile.value = file
+  attachmentPreviewLoading.value = true
+  const conversationId = currentConversation.value.id
+  try {
+    const blob = await getCommunicationPdf(conversationId, file.fileId, { signal: controller.signal })
+    if (controller.signal.aborted || attachmentPreviewRequest !== controller || currentConversation.value.id !== conversationId) return
+    attachmentPreviewUrl.value = URL.createObjectURL(blob)
+  } catch (error) {
+    if (!controller.signal.aborted && attachmentPreviewRequest === controller) attachmentPreviewError.value = error.message || '无法读取会话附件'
+  } finally {
+    if (attachmentPreviewRequest === controller) attachmentPreviewLoading.value = false
+  }
+}
+
+watch(() => currentConversation.value.id, closeAttachmentPreview)
 
 function previewAttachment(file) {
   closeAttachmentPreview()
@@ -1001,7 +1061,12 @@ onBeforeUnmount(() => {
                 },
               ]"
             >
-              <div v-if="message.role === 'assistant'" class="contract-agent__response">
+              <div v-if="message.settledProgress" class="communication-step" :class="{ 'communication-step--settled': !message.progressActive }">
+                <img class="communication-progress-icon" :src="progressImages[message.settledProgress.type]" width="18" height="18" alt="" aria-hidden="true" />
+                <span>{{ taskProgressPresentation(message.settledProgress).text }}</span>
+              </div>
+              <div v-else-if="message.historyError" class="communication-status" role="alert"><p class="is-error">{{ message.content }}</p></div>
+              <div v-else-if="message.role === 'assistant'" class="contract-agent__response">
                 <div v-if="message.operationLabel || message.processPath?.length" class="contract-agent__response-header">
                   <span v-if="message.operationLabel">{{ message.operationLabel }}</span>
                   <button
@@ -1048,7 +1113,7 @@ onBeforeUnmount(() => {
                   @display-state="updateMessageDisplay(message.id, $event)"
                 />
 
-                <footer v-if="canCopyMessage(message)" class="contract-agent__message-actions" aria-label="回复操作">
+                <footer v-if="canCopyMessage(message)" class="contract-agent__message-actions" aria-label="回复操作" @mouseenter="startTimeReference = Date.now()" @focusin="startTimeReference = Date.now()">
                   <button
                     type="button"
                     class="contract-agent__copy-action"
@@ -1071,15 +1136,21 @@ onBeforeUnmount(() => {
                       </svg>
                     </Transition>
                   </button>
-                  <time v-if="message.createdAt">{{ message.createdAt }}</time>
+                  <time v-if="turnStartTimes.get(message.turnId)" :datetime="turnStartTimes.get(message.turnId).datetime" :title="`开始处理时间：${turnStartTimes.get(message.turnId).fullLabel}`" :aria-label="`开始处理时间：${turnStartTimes.get(message.turnId).fullLabel}`">{{ turnStartTimes.get(message.turnId).label }}</time>
                 </footer>
               </div>
 
               <template v-else>
                 <ul v-if="message.attachments?.length" class="contract-agent__sent-files" aria-label="已上传的文件">
                   <li v-for="(file, index) in message.attachments" :key="index" :title="file.name">
+                    <component :is="canPreviewCommunicationFile(file, message.turnStatus) ? 'button' : 'span'"
+                      class="contract-agent__sent-file-content"
+                      :type="canPreviewCommunicationFile(file, message.turnStatus) ? 'button' : undefined"
+                      :aria-label="canPreviewCommunicationFile(file, message.turnStatus) ? `预览附件：${file.name}` : undefined"
+                      @click="previewSentAttachment(file, message)">
                     <span class="contract-agent__sent-file-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11.5 2.5h-6a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-10zm0 0v4h4M7.5 10h5M7.5 13h5" /></svg></span>
                     <div class="contract-agent__sent-file-info"><span>{{ file.name }}</span><small>PDF 文档</small></div>
+                    </component>
                   </li>
                 </ul>
                 <MarkdownMessage
@@ -1088,7 +1159,7 @@ onBeforeUnmount(() => {
                   :content="message.content"
                 />
               </template>
-              <span v-if="message.role === 'user' && ['rejected', 'failed', 'expired'].includes(message.turnStatus)" class="communication-message-status">{{ turnLabels[message.turnStatus] }}</span>
+              <span v-if="message.role === 'user' && ['failed', 'expired'].includes(message.turnStatus)" class="communication-message-status">{{ turnLabels[message.turnStatus] }}</span>
               <ul v-if="message.references?.length" class="communication-references" aria-label="引用合同">
                 <li v-for="(reference, index) in message.references" :key="index" :title="reference.document_id">
                   <a v-if="reference.type === 'web'" :href="reference.location" target="_blank" rel="noopener noreferrer">{{ reference.location }}</a>
@@ -1125,14 +1196,6 @@ onBeforeUnmount(() => {
             <div v-if="restoring" class="communication-status" role="status">正在恢复对话…</div>
             <div v-if="currentTurn" class="communication-status" aria-live="polite">
               <p v-if="replying && !currentConversation.submitting && ['recovering', 'disconnected'].includes(currentTurn.connection)">{{ currentTurn.connection === 'recovering' ? '连接中断，正在恢复…' : '连接已断开，轮次状态待确认' }}</p>
-              <template v-if="currentTurn.gate_result && (!startedFinalTurns.has(currentTurn.turn_id) || expandedTurnProcesses.has(currentTurn.turn_id))">
-                <p>{{ currentTurn.gate_result.message }}</p>
-                <ul v-if="currentTurn.gate_result.files?.length">
-                  <li v-for="file in currentTurn.gate_result.files" :key="file.file_id" :class="{ 'is-error': !file.accepted }">
-                    {{ file.accepted ? '已保留' : '未保留' }} · {{ file.file_name }}<template v-if="file.reason">：{{ file.reason }}</template>
-                  </li>
-                </ul>
-              </template>
               <p v-if="currentTurn.error" class="is-error" role="alert">{{ currentTurn.error.message }}</p>
               <template v-if="currentTurn.connection === 'disconnected'">
                 <p class="is-error">{{ currentTurn.connectionError }}</p>
@@ -1143,11 +1206,14 @@ onBeforeUnmount(() => {
             <Transition name="tail-activity" mode="out-in">
               <article
                 v-if="tailActivity"
-                :key="tailActivity.text"
+                :key="tailActivity.type"
                 class="contract-agent__message contract-agent__message--assistant communication-thinking"
                 :class="{ 'is-thinking': tailActivity.thinking }"
               >
-                <div :class="tailActivity.thinking ? 'contract-agent__thinking' : 'communication-step'" role="status">{{ tailActivity.text }}</div>
+                <div :class="tailActivity.thinking ? 'contract-agent__thinking' : 'communication-step'" role="status">
+                  <img v-if="progressImages[tailActivity.type]" class="communication-progress-icon" :src="progressImages[tailActivity.type]" width="18" height="18" alt="" aria-hidden="true" />
+                  <span>{{ tailActivity.text }}</span>
+                </div>
               </article>
             </Transition>
 
@@ -1166,12 +1232,12 @@ onBeforeUnmount(() => {
                 <button
                   type="button"
                   class="contract-agent__queue-steer"
-                  :disabled="currentConversation.submitting || currentConversation.cancelling"
-                  :title="replying ? '立即提交这条问题，替代当前轮次' : '立即发送这条排队消息'"
+                  :disabled="currentConversation.submitting || currentConversation.cancelling || (replying && !canInterrupt)"
+                  :title="taskPending ? canInterrupt ? '立即提交这条问题，替代当前轮次' : '当前任务暂不允许调整方向' : '立即发送这条排队消息'"
                   @click="steerQueuedMessage(item)"
                 >
                   <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 16v-4a5 5 0 0 1 5-5h5M11 3l4 4-4 4" /></svg>
-                  {{ item.sending ? '发送中' : replying ? '调整方向' : '立即发送' }}
+                  {{ item.sending ? '发送中' : taskPending ? '调整方向' : '立即发送' }}
                 </button>
                 <button type="button" class="contract-agent__queue-remove" :disabled="item.sending" aria-label="移除这条待发送消息" @click="communication.removeQueued(currentConversation, item.id)">
                   <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg>
@@ -1198,7 +1264,6 @@ onBeforeUnmount(() => {
                   class="contract-agent__attachment-remove"
                   :aria-label="`移除附件：${file.name}`"
                   :title="`移除 ${file.name}`"
-                  :disabled="currentConversation.submitting"
                   @click="removeAttachment(index)"
                 >
                   <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg>
@@ -1212,9 +1277,10 @@ onBeforeUnmount(() => {
               rows="1"
               placeholder="询问合同相关问题…"
               aria-label="输入合同相关问题"
-              :disabled="currentConversation.submitting || restoring"
+              :disabled="restoring || currentConversation.deleting || currentConversation.renaming"
               @input="resizeComposer"
               @keydown="handleComposerKeydown"
+              @paste="handleComposerPaste"
             ></textarea>
 
             <div class="contract-agent__composer-actions">
@@ -1248,9 +1314,9 @@ onBeforeUnmount(() => {
                 class="contract-agent__composer-action contract-agent__composer-action--send"
                 :class="{ 'is-stop': stopMode }"
                 :type="stopMode ? 'button' : 'submit'"
-                :disabled="composerBusy || restoring || (!replying && !prompt.trim() && !selectedAttachments.length)"
-                :aria-label="stopMode ? '停止回复' : replying || currentConversation.queue.length ? '加入消息队列' : '发送消息'"
-                :title="stopMode ? '停止回复' : replying || currentConversation.queue.length ? '加入队列，等待当前轮次完成' : '发送消息'"
+                :disabled="composerBusy || restoring || (stopMode && !canInterrupt) || (!replying && !prompt.trim() && !selectedAttachments.length)"
+                :aria-label="stopMode ? '停止回复' : taskPending || currentConversation.queue.length ? '加入消息队列' : '发送消息'"
+                :title="stopMode ? canInterrupt ? '停止回复' : '当前任务暂不允许停止' : taskPending || currentConversation.queue.length ? '加入队列，等待当前轮次完成' : '发送消息'"
                 @click="stopMode && stopReply()"
               >
                 <Transition name="send-state" mode="out-in">
@@ -1302,6 +1368,7 @@ onBeforeUnmount(() => {
       :src="attachmentPreviewUrl"
       :label="attachmentPreviewFile?.name || ''"
       :error="attachmentPreviewError"
+      :loading="attachmentPreviewLoading"
       :retryable="false"
       @close="closeAttachmentPreview"
     />
@@ -1410,7 +1477,11 @@ onBeforeUnmount(() => {
 .communication-thinking.is-thinking {
   margin-top: -9px;
 }
-.communication-step { margin-inline: 2px; }
+.communication-step { margin-inline: 2px; display: flex; align-items: center; gap: 8px; }
+.communication-progress-icon { display: block; flex: 0 0 18px; object-fit: contain; }
+.communication-step--settled { color: #9ca59f; font-weight: 400; }
+.communication-step--settled .communication-progress-icon { opacity: .55; filter: grayscale(1); }
+.communication-step.communication-step--settled > span { animation: none; }
 @media (prefers-reduced-motion: reduce) {
   .turn-timing-enter-active,
   .turn-timing-leave-active { transition: none; }
@@ -1427,7 +1498,7 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
 }
 .communication-status p { margin: 4px 0; }
-.communication-status ul, .communication-references { padding-left: 18px; margin: 6px 0; }
+.communication-references { padding-left: 18px; margin: 6px 0; }
 .communication-status .is-error { color: #ad625a; }
 .communication-status button {
   padding: 5px 10px;
@@ -2105,6 +2176,10 @@ onBeforeUnmount(() => {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.contract-agent__sent-file-content { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; border: 0; padding: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
+button.contract-agent__sent-file-content { cursor: pointer; border-radius: 5px; }
+button.contract-agent__sent-file-content:hover { color: #397053; }
+button.contract-agent__sent-file-content:focus-visible { outline: 2px solid #719780; outline-offset: 4px; }
 .contract-agent__sent-file-icon {
   display: grid;
   place-items: center;
@@ -2372,6 +2447,10 @@ onBeforeUnmount(() => {
   color: #95a098;
   font-size: 13px;
   line-height: 24px;
+}
+
+.contract-agent__thinking,
+.communication-step > span {
   animation: contract-agent-thinking-highlight 2.8s ease-in-out infinite;
 }
 
@@ -2864,7 +2943,8 @@ onBeforeUnmount(() => {
     animation: none;
   }
 
-  .contract-agent__thinking {
+  .contract-agent__thinking,
+  .communication-step > span {
     animation: none;
   }
 

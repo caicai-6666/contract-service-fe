@@ -4,7 +4,7 @@ import { getCommunicationHistory } from './communicationApi.js'
 import { renameCommunicationConversation, deleteCommunicationConversation, validateConversationName } from './communicationApi.js'
 import { getAuthSession } from './contractApi.js'
 import { listCommunicationConversations, createCommunicationConversation, createCommunicationTurn, getCommunicationSnapshot, cancelCommunicationTurn, streamCommunicationEvents } from './communicationApi.js'
-import { createTurnState, applyTurnEvent, applyTurnSnapshot, TERMINAL_TURN_STATUSES, validateTurnInput } from '../models/communicationTurn.js'
+import { createTurnState, applyTurnEvent, applyTurnSnapshot, TERMINAL_TURN_STATUSES, validateTurnInput, turnDisplayMessages, settleTurnProgress, canInterruptTurn, sequence } from '../models/communicationTurn.js'
 
 export function newConversation() {
   return { id: crypto.randomUUID(), registered: false, name: '新对话', messages: [], turns: [], queue: [], queuePaused: false, replying: false, submitting: false, cancelling: false }
@@ -28,7 +28,7 @@ export function createCommunicationSession() {
       // 只保存本标签页的定位信息与用户展示记录；模型输出通过快照恢复，不保存文件字节。
       const records = conversations.value.map((c) => ({
         id: c.id, registered: c.registered, name: c.name, createdAt: c.createdAt, customName: c.customName,
-        messages: c.localUsers ?? c.messages.filter((m) => m.role === 'user' && !m.fromHistory),
+        messages: c.localUsers ?? c.messages.filter((m) => m.role === 'user' && !m.fromHistory && !m.pendingSubmission),
         turns: c.turns.map((t) => ({ conversation_id: c.id, turn_id: t.turn_id, status: t.status })),
       }))
       window.sessionStorage.setItem(storageKey, JSON.stringify({ selectedConversationId: selectedConversationId.value, conversations: records }))
@@ -37,20 +37,23 @@ export function createCommunicationSession() {
 
   function sync(conversation, save = true) {
     if (conversation.removed) return
-    const users = [...new Map([...(conversation.localUsers ?? []), ...conversation.messages.filter((m) => m.role === 'user' && !m.fromHistory)].map((message) => [message.id, message])).values()]
+    const users = [...new Map([...(conversation.localUsers ?? []), ...conversation.messages.filter((m) => m.role === 'user' && !m.fromHistory && !m.pendingSubmission)].map((message) => [message.id, message])).values()]
     conversation.localUsers = users
     const localMessages = users.flatMap((user) => {
       const turn = conversation.turns.find((t) => t.turn_id === user.turnId)
       if (!turn) return [user]
       user.turnStatus = turn.status
-      return [user, ...turn.messages.map((m) => ({
+      return [user, ...turnDisplayMessages(turn).map((m) => ({
         id: `${turn.turn_id}:${m.message_id}`, turnId: turn.turn_id,
         role: 'assistant', content: m.text, messageKind: m.message_kind,
         status: m.status, references: m.references,
         operationLabel: m.operation || '',
+        settledProgress: m.progress,
+        progressActive: m.progressActive,
       }))]
     })
     conversation.messages = mergeCommunicationHistory(conversation.history, localMessages, conversation.turns)
+    if (conversation.pendingMessage) conversation.messages.push(conversation.pendingMessage)
     conversation.replying = conversation.turns.some((t) => !TERMINAL_TURN_STATUSES.has(t.status) && !t.unavailable)
     if (save) persist()
     scheduleQueue(conversation)
@@ -176,7 +179,11 @@ export function createCommunicationSession() {
   async function submit(conversation, text, files, userMessage) {
     if (conversation.removed || conversation.deleting || conversation.renaming || conversation.submitting || conversation.cancelling) throw new Error('当前请求尚未完成，请稍候')
     const old = conversation.turns.findLast((t) => !TERMINAL_TURN_STATUSES.has(t.status) && !t.unavailable)
+    if (old && !canInterruptTurn(old)) throw new Error('当前任务暂不允许调整方向，请等待可打断信号')
     conversation.submitting = true
+    // 注册前只投影用户输入，不伪造服务端轮次或激活时间，也不写入恢复缓存。
+    conversation.pendingMessage = { ...userMessage, pendingSubmission: true }
+    sync(conversation, false)
     try {
       const isNew = !conversation.registered
       const created = isNew
@@ -194,7 +201,9 @@ export function createCommunicationSession() {
       }
       if (old) {
         streams.get(old.turn_id)?.abort()
+        settleTurnProgress(old)
         old.status = 'superseded'
+        old.can_interrupt = false
         old.context_status = 'user_goal_adjusted'
         old.superseded_by_turn_id = turn.turn_id
         old.messages.forEach((m) => { if (m.status === 'streaming') m.status = 'interrupted' })
@@ -203,12 +212,14 @@ export function createCommunicationSession() {
       }
       conversation.turns.push(turn)
       conversation.queuePaused = false
+      conversation.pendingMessage = null
       conversation.messages.push({ ...userMessage, turnId: turn.turn_id })
       sync(conversation)
       // 立即激活，不等待 UI 入场动画或用户再次点击。
       void connect(conversation, conversation.turns.at(-1))
       return turn
     } catch (error) {
+      conversation.queuePaused = true
       if (error.status === 409 && old) {
         await snapshot(conversation, old).catch(() => {})
       }
@@ -216,12 +227,17 @@ export function createCommunicationSession() {
         throw new Error(`${error.message || '网络异常'}。提交结果可能未确认，请勿连续重复提交。`)
       }
       throw error
-    } finally { conversation.submitting = false }
+    } finally {
+      conversation.pendingMessage = null
+      conversation.submitting = false
+      sync(conversation)
+    }
   }
 
   async function cancel(conversation) {
     const turn = conversation.turns.findLast((t) => !TERMINAL_TURN_STATUSES.has(t.status) && !t.unavailable)
     if (!turn || conversation.cancelling || conversation.submitting) return
+    if (!canInterruptTurn(turn)) throw new Error('当前任务暂不允许停止，请等待可打断信号')
     conversation.queuePaused = true
     conversation.cancelling = true
     try {
@@ -320,7 +336,24 @@ export function createCommunicationSession() {
       conversation.historyLoaded = true
       conversation.historyNeedsOpen = false
       if (revision === listRevision && !conversation.renaming) Object.assign(conversation, { name: history.name, createdAt: history.createdAt })
+      // 新历史携带真实游标，恢复活动任务而不重新注册；已有 SSE 不被历史覆盖。
+      const resumed = []
+      for (const turn of history.turns) {
+        const existing = conversation.turns.find(item => item.turn_id === turn.turn_id)
+        // 历史顶层是当前权限；忽略比已接收 SSE 更早的响应，避免迟到数据重新开放操作。
+        if (existing && !TERMINAL_TURN_STATUSES.has(existing.status)
+          && (turn.last_sequence == null || sequence(turn.last_sequence) >= sequence(existing.last_sequence))) existing.can_interrupt = turn.can_interrupt
+        if (!['pending_activation', 'processing'].includes(turn.status) || turn.event_source !== 'recorded'
+          || existing) continue
+        const user = history.messages.find(message => message.role === 'user' && message.turnId === turn.turn_id)
+        if (!user) continue
+        Object.assign(turn, { history: false, localSession: true })
+        conversation.turns.push(turn)
+        conversation.messages.push({ ...user, fromHistory: false })
+        resumed.push(turn.turn_id)
+      }
       sync(conversation)
+      resumed.forEach(id => { void connect(conversation, conversation.turns.find(turn => turn.turn_id === id)) })
       return true
     } catch (error) {
       if (!disposed && !conversation.removed && error.name !== 'AbortError') {
