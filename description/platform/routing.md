@@ -11,13 +11,16 @@
 | `/` | 重定向到 `/library` |
 | `/library` | 合同库 |
 | `/ingestion` | 合同处理流 |
+| `/network` | 关系网 |
 | 其他路径 | 重定向到 `/library` |
 
-路由历史以 Vite 的 `import.meta.env.BASE_URL` 为基础。当前 `base` 为 `/dev/contract/`，因此开发环境中的完整页面路径分别是 `/dev/contract/library` 和 `/dev/contract/ingestion`。
+路由历史以 Vite 的 `import.meta.env.BASE_URL` 为基础。当前 `base` 为 `/dev/contract/`，因此开发环境中的完整页面路径分别是 `/dev/contract/library`、`/dev/contract/ingestion` 和 `/dev/contract/network`。
 
-合同库和具备新增权限时的处理流在登录后完成渲染，并在工作台双页面轨道中持续挂载。用户在两个模块之间切换时，各自的会话、已选择文件、处理任务、流程状态和本地校对内容继续保留。不可见页面暂停不必要的计时和交互监听；重新进入时恢复布局测量，仍需保持同步的处理事件连接不被中断。合同库保留原有双栏空间，右侧展示[正式合同目录与档案筛选](../features/contract-library.md)，实例、筛选及滚动位置持续保留，返回时不重复请求。首次档案展示等待工作台入场与初始数据布局完成；目录通过手动刷新更新，相同结果不重复播放列表动画。
+合同库、处理流和关系网在登录后完成渲染，并在工作台三页面轨道中持续挂载。用户在模块之间切换时，各自的会话、已选择文件、处理任务、流程状态和本地校对内容继续保留。不可见页面暂停不必要的计时和交互监听；重新进入时恢复布局测量，仍需保持同步的处理事件连接不被中断。合同库保留原有双栏空间，右侧展示[正式合同目录与档案筛选](../features/contract-library.md)，实例、筛选及滚动位置持续保留，返回时不重复请求。首次档案展示等待工作台入场与初始数据布局完成；目录通过手动刷新更新，相同结果不重复播放列表动画。
 
-工作台导航按模块顺序移动双页面轨道：从合同库进入处理流时，已经渲染在右侧的处理流随轨道进入视口；返回合同库时反向移动。切换过程始终同时呈现当前页和相邻目标页，而不是在路由变化后临时挂载目标组件；顶部导航指示器同步滑动。系统启用减少动态效果时直接切换最终页面。
+顶部导航依次为合同库、处理流、关系网。工作台导航按模块顺序移动三页面轨道：从合同库进入处理流时，已经渲染在右侧的处理流随轨道进入视口；返回合同库时反向移动。切换过程始终同时呈现当前页和相邻目标页，而不是在路由变化后临时挂载目标组件；顶部导航指示器同步滑动。系统启用减少动态效果时直接切换最终页面。
+
+关系网使用正式合同目录及一跳关系接口展示可交互的无向关系图；功能与数据边界见[合同关系网](../features/contract-network.md)。
 
 ## 登录边界
 
@@ -25,6 +28,6 @@
 
 ## 部署要求
 
-History 模式下，浏览器直接访问或刷新 `/dev/contract/library`、`/dev/contract/ingestion` 等前端路径时，Nginx 必须将请求回退到前端 `index.html`。静态资源和 `/dev/contract/api` 请求不得进入该回退规则；API 仍按[前端登录与鉴权](authentication.md)中说明的链路转发。
+History 模式下，浏览器直接访问或刷新 `/dev/contract/library`、`/dev/contract/ingestion`、`/dev/contract/network` 等前端路径时，Nginx 必须将请求回退到前端 `index.html`。静态资源和 `/dev/contract/api` 请求不得进入该回退规则；API 仍按[前端登录与鉴权](authentication.md)中说明的链路转发。
 
-开发服务器不会将 `pdfjs-dist` 放入 Vite 的 `node_modules/.vite/deps` 预打包目录。PDF.js 保持按需加载，但使用不含 `/.vite/` 隐藏目录段的标准模块地址，以兼容会拦截隐藏目录 URL 的 Nginx 规则。修改此项配置后必须重启 Vite 开发服务器。
+开发服务器使用 `node_modules/vite-cache` 保存依赖预打包结果，避免网关拦截隐藏目录；3d-force-graph 与 Three.js 在此预打包，减少首次加载的模块请求。开发服务器不会将 `pdfjs-dist` 放入 Vite 的 `node_modules/.vite/deps` 预打包目录。PDF.js 保持按需加载，但使用不含 `/.vite/` 隐藏目录段的标准模块地址，以兼容会拦截隐藏目录 URL 的 Nginx 规则。修改此项配置后必须重启 Vite 开发服务器。

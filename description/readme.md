@@ -10,10 +10,11 @@
 | --- | --- |
 | 了解前端项目定位、开发思想与边界 | [项目开发原则](project.md) |
 | 进行代码开发、修改或重构 | [`AGENTS.md`](../AGENTS.md) |
-| 了解审核用户登录、权限等级和接口鉴权 | [前端登录与鉴权](platform/authentication.md) |
+| 了解审核用户登录、会话和接口鉴权 | [前端登录与鉴权](platform/authentication.md) |
 | 了解页面路由、页面状态保留和部署回退要求 | [前端页面路由](platform/routing.md) |
 | 构建前端镜像、配置后端地址与容器运行 | [Docker 部署](platform/docker.md) |
 | 了解正式合同目录、筛选、PDF 预览和删除 | [合同库档案筛选](features/contract-library.md) |
+| 了解合同关系网和交互原型 | [合同关系网](features/contract-network.md) |
 | 了解合同提取、查重、校对和正式入库 | [合同处理流展示](features/contract-ingestion.md) |
 | 了解智能助手的会话交互 | [智能助手会话交互](features/agent-conversation.md) |
 | 新建、修改或审查文档 | [文档撰写风格手册](documentation.md) |
@@ -28,11 +29,12 @@ description/
 ├── readme.md                  文档统一入口与职责说明
 ├── documentation.md           文档命名、结构、表达与维护规范
 ├── platform/                  跨业务的前端基础能力
-│   ├── authentication.md      登录、浏览器会话、权限与接口鉴权
+│   ├── authentication.md      登录、浏览器会话与接口鉴权
 │   ├── routing.md             页面路由、状态保留与部署回退
 │   └── docker.md              镜像构建、容器运行与 API 转发
 └── features/                  面向用户的业务功能
     ├── contract-library.md    正式合同目录、筛选、预览与删除
+    ├── contract-network.md    合同关系网与原型数据边界
     ├── contract-ingestion.md  合同提取、查重、审核校对与入库
     └── agent-conversation.md  智能助手会话、消息与流式通信
 ```

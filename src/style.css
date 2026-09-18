@@ -21,6 +21,8 @@ body,
 }
 
 body {
+  -webkit-user-select: none;
+  user-select: none;
   margin: 0;
   overflow: hidden;
 }
@@ -28,6 +30,47 @@ body {
 button,
 input {
   font: inherit;
+}
+
+/* 界面默认不选中文字；业务正文、可编辑内容和 PDF 文本显式开放复制。 */
+:where(
+  input, textarea, [contenteditable="true"], [contenteditable=""],
+  .selectable-content,
+  .markdown-message,
+  .contract-summary__bubble p,
+  .contract-summary-detail p,
+  .overview-summary__text,
+  .contract-notes__content,
+  .contract-notes__author,
+  .contract-notes__meta time,
+  .contract-links__description,
+  .contract-links__author,
+  .contract-links__meta time,
+  .truncated-text__bubble,
+  .network-metadata dd,
+  .network-related-contracts p,
+  .deduplication-candidate__reasoning p,
+  .classification-stage-result__description p,
+  .classification-stage-result__categories p,
+  .document-detection-result p,
+  .document-detection-result li,
+  [role="alert"],
+  .textLayer
+) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* 正文中嵌入的操作控件仍不可选中，label 内的输入框使用上面的独立规则。 */
+:where(button, [role="button"], [role="tab"], [role="option"], nav, label, legend, dt, h1, h2, h3, h4, h5, h6) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 模型回复中的标题属于回答正文，允许与上下文一起复制。 */
+:where(.markdown-message h1, .markdown-message h2, .markdown-message h3, .markdown-message h4, .markdown-message h5, .markdown-message h6, .markdown-message dt) {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .welcome-page {
@@ -90,6 +133,8 @@ input {
 }
 
 .prototype-workspace__header {
+  -webkit-user-select: none;
+  user-select: none;
   z-index: 2;
   display: grid;
   grid-template-columns: 1fr auto 1fr;
@@ -134,7 +179,7 @@ input {
 .prototype-workspace__nav {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   justify-self: center;
   width: clamp(220px, 28vw, 330px);
   padding: 5px;
@@ -151,7 +196,7 @@ input {
   top: 5px;
   bottom: 5px;
   left: 5px;
-  width: calc(50% - 7px);
+  width: calc((100% - 18px) / 3);
   pointer-events: none;
   background: #ffffffeb;
   border: 1px solid #ffffffd1;
@@ -259,10 +304,6 @@ input {
   will-change: transform;
 }
 
-.workspace-route-track.is-ingestion {
-  transform: translate3d(-100%, 0, 0);
-}
-
 .workspace-route-panel {
   position: absolute;
   inset: 0;
@@ -275,12 +316,17 @@ input {
   transform: translate3d(100%, 0, 0);
 }
 
+.workspace-route-panel--network {
+  transform: translate3d(200%, 0, 0);
+}
+
 .prototype-workspace__content--contract-library {
   padding: 0;
   overflow: hidden;
 }
 
-.prototype-workspace__content--contract-ingestion {
+.prototype-workspace__content--contract-ingestion,
+.prototype-workspace__content--contract-network {
   padding: 0;
   overflow: hidden;
 }

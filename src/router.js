@@ -1,8 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import ContractIngestionView from './components/ContractIngestionView.vue'
 import ContractLibraryView from './components/ContractLibraryView.vue'
-import { getAuthSession } from './services/contractApi.js'
-import { getContractPermissions } from './models/contractPermissions.js'
+import ContractNetworkView from './components/ContractNetworkView.vue'
 
 const routes = [
   { path: '/', redirect: '/library' },
@@ -18,16 +17,18 @@ const routes = [
     component: ContractIngestionView,
     meta: { sectionIndex: 1 },
   },
+  {
+    path: '/network',
+    name: 'contract-network',
+    component: ContractNetworkView,
+    meta: { sectionIndex: 2 },
+  },
   { path: '/:pathMatch(.*)*', redirect: '/library' },
 ]
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes,
-})
-
-router.beforeEach((to) => {
-  if (to.name === 'contract-ingestion' && !getContractPermissions(getAuthSession()?.permissionLevel).canCreate) return '/library'
 })
 
 export default router

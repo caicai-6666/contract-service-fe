@@ -11,10 +11,14 @@ import {
   watch,
 } from 'vue'
 import ExtractionAiControl from './ExtractionAiControl.vue'
+import ContractOverviewSummary from './ContractOverviewSummary.vue'
+import TruncatedText from './TruncatedText.vue'
+import { CONTRACT_OVERVIEW_STAGE_CODE, modelContractOverview } from '../models/contractOverview.js'
 import ContractDateWheel from './ContractDateWheel.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
 import BatchExtractionDialog from './BatchExtractionDialog.vue'
+import { deduplicationInteraction } from '../models/deduplicationReview.js'
 import { awaitsExtractionFollowup } from '../models/extractionEventLifecycle.js'
 import { getSelectedFileKind, convertImageFileToPdf } from '../services/local-file-pdf.js'
 import PdfWorker from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?worker'
@@ -40,7 +44,7 @@ const props = defineProps({ active: { type: Boolean, default: true } })
 const emit = defineEmits(['visual-pause-change'])
 const batchExtractionOpen = ref(false)
 
-const stageOrder = ['detection', 'duplication', 'preprocessing', 'classification', 'naming', 'field', 'clause', 'retrieval']
+const stageOrder = ['detection', 'duplication', 'preprocessing', 'classification', 'overview', 'field', 'clause', 'retrieval']
 const PDF_COVER_MAX_RASTER_SIDE = 1600
 const PDFJS_ASSET_BASE = `${import.meta.env.BASE_URL}pdfjs/`
 const branchIds = ['field', 'clause', 'retrieval']
@@ -50,7 +54,7 @@ const backendStageToLocal = {
   contract_structure_recognition: 'preprocessing',
   pdf_deduplication: 'duplication',
   contract_classification: 'classification',
-  file_name_generation: 'naming',
+  [CONTRACT_OVERVIEW_STAGE_CODE]: 'overview',
   core_extraction: 'field',
   clause_extraction: 'clause',
   retrieval_preparation: 'retrieval',
@@ -110,17 +114,17 @@ const stages = reactive({
     duration: '—',
     summary: '结合文档结构判断合同类别，并为后续提取准备统一上下文。',
   },
-  naming: {
-    id: 'naming',
-    eyebrow: '智能命名',
-    name: '合同建议名称',
-    message: '等待根据合同内容生成建议名称。',
+  overview: {
+    id: 'overview',
+    eyebrow: '合同概述',
+    name: '合同概述生成',
+    message: '等待根据合同内容生成建议名称与摘要。',
     status: 'pending',
     progress: null,
     attempt: 0,
     retryable: false,
     duration: '—',
-    summary: '结合合同页面、文档结构和分类结果，生成可供入库前校对的展示名称。',
+    summary: '结合合同内容、文档结构和分类结果，一次性生成建议名称与内容摘要。',
   },
   field: {
     id: 'field',
@@ -261,7 +265,7 @@ const extractionDraft = ref(null)
 const documentDetection = ref(null)
 const deduplicationReview = ref(null)
 const classificationResult = ref(null)
-const suggestedFileName = ref(null)
+const contractOverview = ref(null)
 const continuationPending = ref(false)
 const continuationError = ref('')
 const candidatePreviewId = ref('')
@@ -311,6 +315,8 @@ const removingClauseIds = reactive(new Set())
 const clausesLocallyModified = ref(false)
 const reviewFileName = ref('')
 const reviewFileNameModified = ref(false)
+const reviewSummary = ref('')
+const reviewSummaryModified = ref(false)
 const ingestionPending = ref(false)
 const ingestionErrors = ref([])
 const ingestionIssues = ref([])
@@ -534,10 +540,15 @@ const coreReviewFields = computed(() => coreDefinitions.value.map((definition) =
   ...definition,
   items: coreReviewModel.get(definition.code) || [],
 })))
-const deduplicationReviewPending = computed(() => (
-  currentRunStatus.value === 'awaiting_deduplication_review'
-  && !deduplicationReview.value?.continued_at
-))
+const deduplicationState = computed(() => deduplicationInteraction(currentRunStatus.value, deduplicationReview.value))
+const deduplicationReviewPending = computed(() => deduplicationState.value === 'pending')
+const deduplicationPresentation = computed(() => ({
+  rejected: { label: '重复合同 · 已终止', description: '本次提取已终止，后续阶段不会继续执行。你仍可查看重复合同及判断依据。' },
+  pending: { label: '等待审核', description: '发现相似度超过阈值的候选合同，提取流程已暂停。请核对后确认继续。' },
+  automatic: { label: '自动通过', description: '未发现重复或相似合同，系统已自动继续后续提取，无需手动确认。' },
+  confirmed: { label: '已确认继续', description: '查重审核已经完成，你仍可查看本次返回的候选合同。' },
+  recorded: { label: '查重结果', description: '本次查重结果已保留，流程状态以服务端为准。' },
+}[deduplicationState.value]))
 const deduplicationDeadline = computed(() => {
   const value = deduplicationReview.value?.review_expires_at
   if (!value) return '—'
@@ -826,6 +837,13 @@ function previewInputPdf() {
   candidatePreviewUrl.value = URL.createObjectURL(selectedFile.value)
   candidatePreviewLabel.value = selectedFileName.value || '输入合同'
   emit('visual-pause-change', true)
+}
+
+function updateDeduplicationReview(review) {
+  if (deduplicationRefreshTimer !== null) window.clearTimeout(deduplicationRefreshTimer)
+  deduplicationRefreshTimer = null
+  deduplicationContentRefreshing.value = false
+  deduplicationReview.value = review
 }
 
 function presentDeduplicationReview(review) {
@@ -1123,9 +1141,10 @@ function syncClauseReviewModelFromDraft() {
     : []
 }
 
-function syncReviewFileNameFromSuggestion() {
+function syncReviewOverviewFromSuggestion() {
+  if (!reviewSummaryModified.value) reviewSummary.value = contractOverview.value?.summary || ''
   if (reviewFileNameModified.value) return
-  const suggestedName = suggestedFileName.value?.file_name
+  const suggestedName = contractOverview.value?.file_name
   reviewFileName.value = typeof suggestedName === 'string' && suggestedName.trim()
     ? suggestedName.trim()
     : stripPdfSuffix(selectedFileName.value).trim()
@@ -1171,7 +1190,7 @@ function applyDraft(draft) {
   extractionDraft.value = draft
   syncCoreReviewModelFromDraft()
   syncClauseReviewModelFromDraft()
-  syncReviewFileNameFromSuggestion()
+  syncReviewOverviewFromSuggestion()
   markResultUpdated()
 }
 
@@ -1187,15 +1206,13 @@ function applyExtractionSnapshot(snapshot, {
   currentRunStatus.value = run.status || ''
   if (run.document) applyProcessedDocument(run.document)
   availableSections.value = Array.isArray(run.available_sections) ? [...run.available_sections] : []
-  Object.values(run.stages || {}).forEach(applyStageSnapshot)
+  Object.entries(run.stages || {}).forEach(([code, stage]) => applyStageSnapshot({ ...stage, code }))
   if (run.document_detection) documentDetection.value = run.document_detection
   if (Object.hasOwn(run, 'classification')) {
     classificationResult.value = normalizeClassificationResult(run.classification)
   }
-  if (Object.hasOwn(run, 'suggested_file_name')) {
-    suggestedFileName.value = run.suggested_file_name
-    syncReviewFileNameFromSuggestion()
-  }
+  contractOverview.value = modelContractOverview(run.contract_overview)
+  syncReviewOverviewFromSuggestion()
   if (snapshot.draft) applyDraft(snapshot.draft)
 
   const hasActiveStage = Object.values(run.stages || {}).some((stage) =>
@@ -1220,7 +1237,7 @@ function applyExtractionSnapshot(snapshot, {
   ) {
     presentDeduplicationReview(run.deduplication)
   } else if (run.deduplication) {
-    deduplicationReview.value = run.deduplication
+    updateDeduplicationReview(run.deduplication)
   }
 }
 
@@ -1281,11 +1298,16 @@ async function handleExtractionEvent(frame, generation) {
   }
   if (
     event.event_type === 'stage.completed'
-    && event.stage?.code === 'file_name_generation'
-    && event.suggested_file_name
+    && event.stage?.code === CONTRACT_OVERVIEW_STAGE_CODE
+    && event.stage?.status === 'succeeded'
   ) {
-    suggestedFileName.value = event.suggested_file_name
-    syncReviewFileNameFromSuggestion()
+    const overview = modelContractOverview(event.contract_overview)
+    if (!overview) throw new TypeError('合同概述完成事件缺少结果，请重新同步任务')
+    contractOverview.value = overview
+    syncReviewOverviewFromSuggestion()
+  } else if (event.stage?.code === CONTRACT_OVERVIEW_STAGE_CODE && ['running', 'retrying', 'failed'].includes(event.stage.status)) {
+    contractOverview.value = null
+    syncReviewOverviewFromSuggestion()
   }
   if (event.overall_status) {
     currentRunStatus.value = event.overall_status
@@ -1320,7 +1342,8 @@ async function handleExtractionEvent(frame, generation) {
   } else if (event.event_type === 'run.continued') {
     continuationPending.value = false
     continuationError.value = ''
-    deduplicationReview.value = event.deduplication || deduplicationReview.value
+    if (event.deduplication) updateDeduplicationReview(event.deduplication)
+    else await refreshExtractionSnapshot(generation)
   } else if (['draft.updated', 'run.review_ready'].includes(event.event_type)) {
     await refreshExtractionSnapshot(generation)
   } else if (event.event_type === 'run.cancelled') {
@@ -1395,7 +1418,7 @@ function resetWorkflowState({ preserveDetail = false } = {}) {
   documentDetection.value = null
   deduplicationReview.value = null
   classificationResult.value = null
-  suggestedFileName.value = null
+  contractOverview.value = null
   continuationPending.value = false
   continuationError.value = ''
   candidatePreviewId.value = ''
@@ -1413,6 +1436,8 @@ function resetWorkflowState({ preserveDetail = false } = {}) {
   clauseFormAnimating.value = false
   reviewFileName.value = ''
   reviewFileNameModified.value = false
+  reviewSummary.value = ''
+  reviewSummaryModified.value = false
   ingestionPending.value = false
   clearIngestionErrors()
   clearIngestionIssues()
@@ -1554,7 +1579,7 @@ function stopWorkflow({ force = false, clearRestoredInput = false } = {}) {
     schedule(() => resetStoppedStages(branchStageIds), rewindDelay)
   }
 
-  const sequentialStageIds = ['naming', 'classification', 'preprocessing', 'duplication', 'detection']
+  const sequentialStageIds = ['overview', 'classification', 'preprocessing', 'duplication', 'detection']
   sequentialStageIds.forEach((stageId) => {
     if (!isActiveStage(stageId)) return
     schedule(() => {
@@ -1603,7 +1628,7 @@ function finalizeCancelledWorkflow(runId) {
   documentDetection.value = null
   deduplicationReview.value = null
   classificationResult.value = null
-  suggestedFileName.value = null
+  contractOverview.value = null
   continuationPending.value = false
   continuationError.value = ''
   workflowError.value = ''
@@ -1618,6 +1643,8 @@ function finalizeCancelledWorkflow(runId) {
   clauseFormAnimating.value = false
   reviewFileName.value = ''
   reviewFileNameModified.value = false
+  reviewSummary.value = ''
+  reviewSummaryModified.value = false
   ingestionPending.value = false
   clearIngestionErrors()
   clearIngestionIssues()
@@ -2415,6 +2442,11 @@ function updateReviewFileName(event) {
   reviewFileNameModified.value = true
 }
 
+function updateReviewSummary(value) {
+  reviewSummary.value = value
+  reviewSummaryModified.value = true
+}
+
 function serializeCoreProperty(value, type) {
   if (value === null || value === undefined || (typeof value === 'string' && !value.trim())) return null
   if (type === 'integer') return Number.parseInt(value, 10)
@@ -2454,17 +2486,15 @@ function ingestionIssue(id, message, target, detail = null) {
 
 function validateIngestionDraft(core, clauses) {
   const issues = []
-  const fileName = reviewFileName.value.trim()
+  const fileName = stripPdfSuffix(reviewFileName.value.trim()).trim()
   if (!fileName) issues.push(ingestionIssue('file-name:required', '请填写最终展示文件名', 'file-name'))
-  if (fileName.length > 255) {
+  if ([...fileName].length > 255) {
     issues.push(ingestionIssue('file-name:max-length', '最终展示文件名不能超过 255 个字符', 'file-name'))
   }
-  if (/[\\/:*?"<>|\r\n]/.test(fileName) || /^[ .]|[ .]$/.test(fileName)) {
-    issues.push(ingestionIssue(
-      'file-name:format',
-      '最终展示文件名包含不允许的字符，或以空格、句点开头或结尾',
-      'file-name',
-    ))
+  const summary = reviewSummary.value.trim()
+  if (!summary) issues.push(ingestionIssue('summary:required', '请填写合同摘要', 'summary'))
+  if ([...summary].length > 3000) {
+    issues.push(ingestionIssue('summary:max-length', '合同摘要不能超过 3000 个字符', 'summary'))
   }
   for (const definition of coreDefinitions.value) {
     const value = core[definition.code]
@@ -2524,6 +2554,7 @@ function validateIngestionDraft(core, clauses) {
 function ingestionTargetFromLocation(location) {
   const fields = Array.isArray(location) ? location.filter((item) => item !== 'body') : []
   if (fields[0] === 'file_name') return 'file-name'
+  if (fields[0] === 'summary') return 'summary'
   if (fields[0] === 'core') {
     const definition = coreDefinitions.value.find((item) => item.code === fields[1])
     if (!definition) return 'core'
@@ -2541,6 +2572,7 @@ function ingestionTargetFromLocation(location) {
 
 function ingestionTargetFingerprint(target) {
   if (target === 'file-name') return reviewFileName.value
+  if (target === 'summary') return reviewSummary.value
   if (target === 'clauses') return String(draftClauses.value.length)
   if (target.startsWith('core:')) {
     const [, definitionCode, rawItemIndex, propertyCode] = target.split(':')
@@ -2562,6 +2594,7 @@ function ingestionFieldLabel(location) {
   const fields = Array.isArray(location) ? location.filter((item) => item !== 'body') : []
   if (!fields.length) return '提交内容'
   if (fields[0] === 'file_name') return '最终展示文件名'
+  if (fields[0] === 'summary') return '合同摘要'
   if (fields[0] === 'core') {
     const definition = coreDefinitions.value.find((item) => item.code === fields[1])
     const propertyCode = fields.find((item) => typeof item === 'string' && definition?.properties.some((property) => property.code === item))
@@ -2792,6 +2825,7 @@ function handleIngestionIssueFocusout(event) {
 
 async function submitIngestion() {
   if (!canIngestResult.value) return
+  reviewFileName.value = stripPdfSuffix(reviewFileName.value.trim()).trim()
   const core = serializeCoreReview()
   const clauses = serializeClauseReview()
   const validationIssues = validateIngestionDraft(core, clauses)
@@ -2808,6 +2842,7 @@ async function submitIngestion() {
   try {
     const receipt = await ingestExtractionRun(runId, {
       file_name: reviewFileName.value.trim(),
+      summary: reviewSummary.value.trim(),
       core,
       clauses,
     }, { signal: controller.signal })
@@ -3140,6 +3175,11 @@ async function animateClauseRemoval(removedIds) {
       fill: 'forwards',
     }).finished.catch(() => {})
   }))
+}
+
+function clauseDisplayPath(clause) {
+  const path = Array.isArray(clause.path) ? clause.path.filter((item) => typeof item === 'string' && item.trim()) : []
+  return path.length ? path : [clause.identifier || clause.title || `条款 ${clause.order}`]
 }
 
 function clausePageLabel(clause) {
@@ -3550,7 +3590,7 @@ onBeforeUnmount(() => {
             <path class="workflow-link__comet" pathLength="100" d="M1130 321 C1150 321 1170 321 1190 321" />
           </g>
 
-          <g class="workflow-link" :class="`is-${edgeState('naming')}`">
+          <g class="workflow-link" :class="`is-${edgeState('overview')}`">
             <path class="workflow-link__bed" d="M1420 321 C1440 321 1460 321 1480 321" />
             <path class="workflow-link__signal" pathLength="100" d="M1420 321 C1440 321 1460 321 1480 321" />
             <path class="workflow-link__comet" pathLength="100" d="M1420 321 C1440 321 1460 321 1480 321" />
@@ -3906,7 +3946,7 @@ onBeforeUnmount(() => {
           {
             'is-classification': detailMode === 'stage' && selectedStageId === 'classification',
             'is-detection': detailMode === 'stage' && selectedStageId === 'detection',
-            'is-naming': detailMode === 'stage' && selectedStageId === 'naming',
+            'is-overview': detailMode === 'stage' && selectedStageId === 'overview',
           },
         ]"
       >
@@ -3955,7 +3995,7 @@ onBeforeUnmount(() => {
           {
             'is-classification': detailMode === 'stage' && selectedStageId === 'classification',
             'is-detection': detailMode === 'stage' && selectedStageId === 'detection',
-            'is-naming': detailMode === 'stage' && selectedStageId === 'naming',
+            'is-overview': detailMode === 'stage' && selectedStageId === 'overview',
           },
         ]"
       >
@@ -4011,22 +4051,18 @@ onBeforeUnmount(() => {
             :class="{ 'is-refreshing': deduplicationContentRefreshing }"
           >
           <span class="ingestion-detail__eyebrow">查重审核</span>
-          <h3>{{ currentRunStatus === 'duplicate_rejected' ? '已发现重复合同' : deduplicationCandidates.length ? '发现可能相关的合同' : '未发现重复合同' }}</h3>
+          <h3>{{ currentRunStatus === 'duplicate_rejected' ? '已发现重复合同' : deduplicationCandidates.length ? '发现可能相关的合同' : '未发现重复或相似合同' }}</h3>
           <p class="ingestion-detail__lead">
-            {{ currentRunStatus === 'duplicate_rejected'
-              ? '本次提取已终止，后续阶段不会继续执行。你仍可查看重复合同及判断依据。'
-              : deduplicationReviewPending
-              ? '提取流程已暂停。请核对候选合同，并在审核期限前确认继续。'
-              : '查重审核已经完成，你仍可查看本次返回的候选合同。' }}
+            {{ deduplicationPresentation.description }}
           </p>
 
           <div
             class="ingestion-detail__status"
             :class="currentRunStatus === 'duplicate_rejected' ? 'is-failed' : deduplicationReviewPending ? 'is-running' : 'is-success'"
           >
-            <span><i></i>{{ currentRunStatus === 'duplicate_rejected' ? '重复合同 · 已终止' : deduplicationReviewPending ? '等待审核' : '已确认继续' }}</span>
+            <span><i></i>{{ deduplicationPresentation.label }}</span>
             <strong>
-              {{ deduplicationReviewPending ? `截止 ${deduplicationDeadline}` : '候选记录已保留' }}
+              {{ deduplicationReviewPending ? `截止 ${deduplicationDeadline}` : deduplicationState === 'automatic' ? '无需人工确认' : deduplicationCandidates.length ? '候选记录已保留' : '无候选合同' }}
             </strong>
           </div>
 
@@ -4096,7 +4132,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-else class="ingestion-detail__notice">
-            查重服务未返回候选，可以直接继续后续分类和提取。
+            {{ deduplicationState === 'automatic' ? '后续流程由系统自动推进，无需点击继续。' : '本次查重未返回候选合同。' }}
           </div>
           <div v-if="candidatePreviewError || continuationError" class="ingestion-detail__error">
             <strong>操作未完成</strong>
@@ -4189,22 +4225,23 @@ onBeforeUnmount(() => {
           </section>
 
           <section
-            v-if="selectedStage.id === 'naming' && selectedStage.status === 'succeeded'"
-            class="classification-stage-result naming-stage-result"
+            v-if="selectedStage.id === 'overview' && selectedStage.status === 'succeeded'"
+            class="classification-stage-result overview-stage-result"
           >
-            <template v-if="suggestedFileName">
+            <template v-if="contractOverview">
               <header class="classification-stage-result__header">
                 <div>
                   <small>建议名称</small>
-                  <strong>{{ suggestedFileName.file_name }}</strong>
+                  <strong>{{ contractOverview.file_name }}</strong>
                 </div>
               </header>
+              <ContractOverviewSummary :summary="contractOverview.summary" />
               <div class="classification-stage-result__description">
                 <span>命名依据</span>
-                <p>{{ suggestedFileName.reasoning }}</p>
+                <p>{{ contractOverview.reasoning }}</p>
               </div>
-              <div v-if="suggestedFileName.evidence?.length" class="classification-stage-result__categories">
-                <article v-for="(evidence, index) in suggestedFileName.evidence" :key="`${evidence.page_number}-${index}`">
+              <div v-if="contractOverview.evidence?.length" class="classification-stage-result__categories">
+                <article v-for="(evidence, index) in contractOverview.evidence" :key="`${evidence.page_number}-${index}`">
                   <div>
                     <h4>第 {{ evidence.page_number }} 页</h4>
                     <p>{{ evidence.content }}</p>
@@ -4213,7 +4250,7 @@ onBeforeUnmount(() => {
               </div>
             </template>
             <div v-else class="classification-stage-result__unavailable">
-              建议名称阶段已经完成，但当前快照没有返回可展示的命名详情。
+              合同概述阶段已经完成，但当前快照没有返回可展示的概述详情。
             </div>
           </section>
 
@@ -4276,12 +4313,31 @@ onBeforeUnmount(() => {
                 <span>文件名主体<b>必填</b></span>
                 <input
                   type="text"
-                  maxlength="255"
                   :value="reviewFileName"
                   :disabled="Boolean(ingestionReceipt)"
                   placeholder="请输入最终展示文件名（无需扩展名）"
                   @input="updateReviewFileName"
                 />
+              </label>
+            </section>
+            <section class="extraction-result-section">
+              <header><strong>合同摘要</strong><span>最终入库摘要</span></header>
+              <label
+                class="extraction-result-file-name extraction-result-summary"
+                :class="{ 'is-issue-focused': activeIngestionIssueTarget === 'summary' }"
+                data-ingestion-target="summary"
+              >
+                <span>摘要内容<b>必填</b></span>
+                <textarea
+                  :value="reviewSummary"
+                  :disabled="ingestionPending || Boolean(ingestionReceipt)"
+                  :aria-invalid="!reviewSummary.trim() || [...reviewSummary.trim()].length > 3000"
+                  placeholder="请核对并填写最终合同摘要"
+                  rows="6"
+                  required
+                  @input="updateReviewSummary($event.target.value)"
+                ></textarea>
+                <small :class="{ 'is-over-limit': [...reviewSummary.trim()].length > 3000 }">{{ [...reviewSummary.trim()].length }} / 3000</small>
               </label>
             </section>
             <section v-if="coreReviewFields.length" class="extraction-result-section">
@@ -4525,8 +4581,12 @@ onBeforeUnmount(() => {
                   </form>
                 </div>
                 <article class="extraction-result-item">
-                  <div class="extraction-result-item__heading">
-                    <h4>{{ clause.identifier || clause.title || `条款 ${clause.order}` }}</h4>
+                  <div class="extraction-result-item__heading clause-review-heading">
+                    <ol class="clause-review-path" aria-label="条款层级路径">
+                      <li v-for="(path, pathIndex) in clauseDisplayPath(clause)" :key="pathIndex">
+                        <TruncatedText :text="path" :max-characters="24" />
+                      </li>
+                    </ol>
                     <div class="extraction-result-item__clause-actions">
                       <span v-if="clausePageLabel(clause)">{{ clausePageLabel(clause) }}</span>
                       <button type="button" @click="toggleClauseEditing(clause)">
@@ -6303,7 +6363,7 @@ onBeforeUnmount(() => {
 .workflow-stage-node--duplication { top: 237px; left: 25.63%; width: 9.66%; }
 .workflow-stage-node--preprocessing { top: 237px; left: 37.82%; width: 9.66%; }
 .workflow-stage-node--classification { top: 237px; left: 50%; width: 9.66%; }
-.workflow-stage-node--naming { top: 237px; left: 62.18%; width: 9.66%; }
+.workflow-stage-node--overview { top: 237px; left: 62.18%; width: 9.66%; }
 .workflow-stage-node--field { top: 60px; left: 74.37%; width: 11.34%; }
 .workflow-stage-node--clause { top: 237px; left: 74.37%; width: 11.34%; }
 .workflow-stage-node--retrieval { top: 414px; left: 74.37%; width: 11.34%; }
@@ -7533,14 +7593,14 @@ onBeforeUnmount(() => {
 .ingestion-detail-shell.is-deduplication,
 .ingestion-detail-shell.is-classification,
 .ingestion-detail-shell.is-detection,
-.ingestion-detail-shell.is-naming {
+.ingestion-detail-shell.is-overview {
   width: min(540px, calc(100% - 36px));
 }
 
 .ingestion-detail.is-deduplication,
 .ingestion-detail.is-classification,
 .ingestion-detail.is-detection,
-.ingestion-detail.is-naming {
+.ingestion-detail.is-overview {
   width: 100%;
   padding: 34px 32px 28px;
 }
@@ -7612,26 +7672,26 @@ onBeforeUnmount(() => {
   transform: translateY(12px) scale(0.985);
 }
 
-.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-naming, .is-result) h3 {
+.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-overview, .is-result) h3 {
   font-size: 25px;
 }
 
-.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-naming, .is-result) .ingestion-detail__eyebrow {
+.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-overview, .is-result) .ingestion-detail__eyebrow {
   font-size: 10px;
 }
 
-.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-naming, .is-result) .ingestion-detail__lead {
+.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-overview, .is-result) .ingestion-detail__lead {
   font-size: 12.5px;
   line-height: 1.8;
 }
 
-.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-naming) .ingestion-detail__status {
+.ingestion-detail:is(.is-deduplication, .is-classification, .is-detection, .is-overview) .ingestion-detail__status {
   padding: 15px 17px;
   font-size: 11.5px;
 }
 
-.ingestion-detail:is(.is-classification, .is-detection, .is-naming) .ingestion-detail__facts dt,
-.ingestion-detail:is(.is-classification, .is-detection, .is-naming) .ingestion-detail__facts dd {
+.ingestion-detail:is(.is-classification, .is-detection, .is-overview) .ingestion-detail__facts dt,
+.ingestion-detail:is(.is-classification, .is-detection, .is-overview) .ingestion-detail__facts dd {
   font-size: 11.5px;
 }
 
@@ -7816,11 +7876,11 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.naming-stage-result .classification-stage-result__header {
+.overview-stage-result .classification-stage-result__header {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.naming-stage-result .classification-stage-result__header strong {
+.overview-stage-result .classification-stage-result__header strong {
   overflow: visible;
   font-size: 18px;
   line-height: 1.5;
@@ -8557,7 +8617,7 @@ onBeforeUnmount(() => {
   font-size: 8px;
 }
 
-.extraction-result-file-name input {
+.extraction-result-file-name :is(input, textarea) {
   box-sizing: border-box;
   width: 100%;
   height: 44px;
@@ -8572,15 +8632,32 @@ onBeforeUnmount(() => {
   box-shadow: inset 0 2px 5px #6d5c3710;
 }
 
-.extraction-result-file-name input:focus {
+.extraction-result-file-name :is(input, textarea):focus {
   border-color: #9b7d4970;
   box-shadow: inset 0 2px 5px #6d5c3710, 0 0 0 3px #b6904d12;
 }
 
-.extraction-result-file-name input:disabled {
+.extraction-result-file-name :is(input, textarea):disabled {
   color: #737b76;
   background: #f2f1ed;
 }
+
+.extraction-result-summary textarea {
+  height: auto;
+  min-height: 150px;
+  max-height: 360px;
+  padding: 12px 13px;
+  resize: vertical;
+  line-height: 1.95;
+}
+
+.extraction-result-summary small {
+  text-align: right;
+  color: #715526;
+  font-size: 11px;
+}
+
+.extraction-result-summary small.is-over-limit { color: #a43e32; }
 
 .extraction-ingestion-button {
   --ingestion-action-primary: #ff5569;
@@ -8961,6 +9038,12 @@ onBeforeUnmount(() => {
   color: #559072;
   font-size: 10px;
 }
+
+.clause-review-heading { align-items: flex-start; gap: 16px; }
+.clause-review-path { display: grid; gap: 7px; flex: 1; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.clause-review-path li { position: relative; min-width: 0; padding-left: 12px; border-left: 2px solid #98722c40; color: #806432; font-size: 12px; line-height: 1.6; }
+.clause-review-path li:last-child { border-left-color: #98722c; color: #513b18; font-size: 13px; font-weight: 700; }
+.clause-review-path :deep(.truncated-text__value) { color: inherit; font-size: inherit; }
 
 .extraction-result-item__clause-actions {
   display: inline-flex;
@@ -9847,7 +9930,7 @@ onBeforeUnmount(() => {
   color: #5b431c;
 }
 
-.ingestion-detail.is-result .extraction-result-file-name input,
+.ingestion-detail.is-result .extraction-result-file-name :is(input, textarea),
 .ingestion-detail.is-result .extraction-result-object input,
 .ingestion-detail.is-result .extraction-result-object select,
 .ingestion-detail.is-result .extraction-result-boolean-control__trigger,
@@ -9878,7 +9961,7 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
-.ingestion-detail.is-result .extraction-result-file-name input::placeholder,
+.ingestion-detail.is-result .extraction-result-file-name :is(input, textarea)::placeholder,
 .ingestion-detail.is-result .extraction-result-object input::placeholder,
 .ingestion-detail.is-result .extraction-result-item textarea::placeholder {
   color: rgb(255 240 187 / 55%);
@@ -9971,7 +10054,7 @@ onBeforeUnmount(() => {
     inset 3px 3px 7px rgb(60 31 1 / 52%);
 }
 
-.ingestion-detail.is-result .extraction-result-file-name input:focus,
+.ingestion-detail.is-result .extraction-result-file-name :is(input, textarea):focus,
 .ingestion-detail.is-result .extraction-result-object input:focus,
 .ingestion-detail.is-result .extraction-result-object select:focus,
 .ingestion-detail.is-result .extraction-result-item textarea:focus {
@@ -9985,7 +10068,7 @@ onBeforeUnmount(() => {
     inset -3px -3px 7px rgb(255 225 126 / 28%);
 }
 
-.ingestion-detail.is-result .extraction-result-file-name input:disabled {
+.ingestion-detail.is-result .extraction-result-file-name :is(input, textarea):disabled {
   color: rgb(255 240 187 / 62%);
   cursor: not-allowed;
   filter: saturate(0.7);

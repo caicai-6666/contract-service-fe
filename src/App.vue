@@ -3,10 +3,10 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ContractIngestionView from './components/ContractIngestionView.vue'
 import ContractLibraryView from './components/ContractLibraryView.vue'
+import ContractNetworkView from './components/ContractNetworkView.vue'
 import LoginCard from './components/LoginCard.vue'
 import MolecularFieldBackground from './components/MolecularFieldBackground.vue'
 import logoUrl from './assets/logo.webp'
-import { getContractPermissions } from './models/contractPermissions.js'
 import {
   AUTH_EXPIRED_EVENT,
   clearAuthSession,
@@ -19,7 +19,6 @@ const loginState = ref(initialAuthSession ? 'success' : 'idle')
 const loginError = ref('')
 const loginNotice = ref('')
 const authSession = ref(initialAuthSession)
-const permissions = computed(() => getContractPermissions(authSession.value?.permissionLevel))
 const visualEffectsPaused = ref(false)
 const route = useRoute()
 const router = useRouter()
@@ -27,6 +26,7 @@ const router = useRouter()
 const workspaceSections = [
   { label: '合同库', to: '/library' },
   { label: '处理流', to: '/ingestion' },
+  { label: '关系网', to: '/network' },
 ]
 const activeSection = computed(() => Number(route.meta.sectionIndex) || 0)
 
@@ -84,7 +84,6 @@ function setVisualEffectsPaused(paused) {
 }
 
 function navigateToSection(section) {
-  if (section.to === '/ingestion' && !permissions.value.canCreate) return
   if (route.path === section.to) return
   router.push(section.to)
 }
@@ -92,10 +91,6 @@ function navigateToSection(section) {
 watch(() => route.fullPath, () => {
   visualEffectsPaused.value = false
 })
-
-watch([authSession, () => route.path], () => {
-  if (authSession.value && !permissions.value.canCreate && route.path === '/ingestion') router.replace('/library')
-}, { immediate: true })
 
 window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
 
@@ -135,7 +130,6 @@ onBeforeUnmount(() => {
           </div>
 
           <nav
-            v-if="permissions.canCreate"
             class="prototype-workspace__nav"
             :style="{ '--workspace-nav-offset': `calc(${activeSection * 100}% + ${activeSection * 4}px)` }"
             aria-label="主要模块"
@@ -177,11 +171,12 @@ onBeforeUnmount(() => {
           :class="{
             'prototype-workspace__content--contract-library': activeSection === 0,
             'prototype-workspace__content--contract-ingestion': activeSection === 1,
+            'prototype-workspace__content--contract-network': activeSection === 2,
           }"
         >
           <div
             class="workspace-route-track"
-            :class="{ 'is-ingestion': activeSection === 1 }"
+            :style="{ transform: `translate3d(-${activeSection * 100}%, 0, 0)` }"
           >
             <section
               class="workspace-route-panel workspace-route-panel--library"
@@ -193,7 +188,6 @@ onBeforeUnmount(() => {
               />
             </section>
             <section
-              v-if="permissions.canCreate"
               class="workspace-route-panel workspace-route-panel--ingestion"
               :aria-hidden="activeSection !== 1"
               :inert="activeSection !== 1"
@@ -202,6 +196,13 @@ onBeforeUnmount(() => {
                 :active="activeSection === 1"
                 @visual-pause-change="setVisualEffectsPaused"
               />
+            </section>
+            <section
+              class="workspace-route-panel workspace-route-panel--network"
+              :aria-hidden="activeSection !== 2"
+              :inert="activeSection !== 2"
+            >
+              <ContractNetworkView :active="activeSection === 2" />
             </section>
           </div>
         </div>

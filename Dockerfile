@@ -15,7 +15,8 @@ FROM nginx:stable-alpine AS runtime
 
 ENV BACKEND_UPSTREAM=contract-service:20000 \
     CLIENT_MAX_BODY_SIZE=100m \
-    NGINX_ENVSUBST_FILTER="^(BACKEND_UPSTREAM|CLIENT_MAX_BODY_SIZE)$"
+    ICON_CACHE_MAX_AGE=2592000 \
+    NGINX_ENVSUBST_FILTER="^(BACKEND_UPSTREAM|CLIENT_MAX_BODY_SIZE|ICON_CACHE_MAX_AGE)$"
 
 COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=build /workspace/dist /usr/share/nginx/html/contract

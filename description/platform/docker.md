@@ -33,6 +33,7 @@ docker run -d --name contract-service-fe \
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `BACKEND_UPSTREAM` | `contract-service:20000` | HTTP 后端的 `主机:端口`，不含协议、路径或尾斜杠 |
+| `ICON_CACHE_MAX_AGE` | `2592000` | 图片和图标的浏览器缓存秒数，默认 30 天；使用非负整数 |
 | `CLIENT_MAX_BODY_SIZE` | `100m` | Nginx 请求体上限，可按部署需要调整；不是后端业务限制 |
 
 仓库根目录的 [`nginx.conf`](../../nginx.conf) 是服务配置模板，Dockerfile 将其复制到 `/etc/nginx/templates/default.conf.template`，容器启动时替换环境变量并生成 `/etc/nginx/conf.d/default.conf`。它是 `server` 配置片段，不是用于替换 `/etc/nginx/nginx.conf` 的全局配置。
@@ -44,8 +45,8 @@ docker run -d --name contract-service-fe \
 - API 保留原始路径、查询参数和 Authorization 请求头，不做 SPA 回退或共享缓存。
 - 关闭代理响应缓冲以支持 SSE；读取超时为两次上游读取之间最长 3600 秒，而非任务总时长。外层网关也必须支持流式转发。
 - 页面路由回退到 `index.html`；缺失的构建资源和 PDF.js 文件返回 404。
-- `assets/` 中带内容哈希的图片及其他构建资源缓存一年并标记 `immutable`，内容更新后由新文件名刷新缓存。小图片可能由 Vite 内联到 JS，随对应带哈希的 JS 文件缓存。
-- `public/` 中固定文件名的图片（包括 SVG 图标）缓存 7 天，覆盖 AVIF、WebP、PNG、JPEG、GIF、SVG、ICO、BMP、TIFF 和 APNG。过期后可通过 ETag / Last-Modified 协商缓存；同名替换在有效期内可能仍显示旧图，需要立即更新时应更换文件名或引用 URL 的版本参数。缺失图片返回 404，不附加长期缓存头。
+- 图片图标构建时不内联到 JS，独立输出到 `assets/`，默认缓存 30 天并标记 `immutable`；内容更新后通过带内容哈希的新文件名获取新版本。JS/CSS 等其他带哈希资源仍缓存一年。组件内直接绘制的 SVG 无独立网络请求，随所属 JS 缓存。此行为使用 [Vite 图片内联配置](https://vite.dev/config/build-options.html#build-assetsinlinelimit)。
+- `public/` 中固定文件名的图片（包括 SVG 图标）默认缓存 30 天，覆盖 AVIF、WebP、PNG、JPEG、GIF、SVG、ICO、BMP、TIFF 和 APNG。过期后可通过 ETag / Last-Modified 协商缓存；同名替换在有效期内可能仍显示旧图，需要立即更新时应更换文件名或引用 URL 的版本参数。缺失图片返回 404，不附加长期缓存头。
 - HTML 和未带版本路径的 PDF.js 资源仍要求重新验证；API 和受保护的合同 PDF 不受图片缓存规则影响。以上配置仅针对 Docker 内的生产 Nginx，不修改开发服务器缓存；外层网关不应覆盖这些响应头。
 - `/healthz` 仅验证 Nginx 存活，不表示后端可用。正式合同 PDF 通过鉴权 API 获取，不写入前端镜像。
 
@@ -62,3 +63,5 @@ docker logs contract-service-fe
 ```
 
 前两个页面应返回 HTML，缺失资源应返回 404。进一步在浏览器验证登录、页面刷新、PDF 封面与预览、上传和 SSE；后端未启动时 API 应返回网关错误而非 HTML 页面。
+
+图片缓存回归可在构建后执行 `python3 tests/iconCacheDocker.py contract-service-fe:local`。脚本启动临时容器并自动清理，验证默认 30 天和环境变量覆盖、所有构建图片、公共 SVG 的 304、HTML/PDF.js 重验证、缺失资源 404 及 API 不套用图片缓存。验证容器不连接真实后端。

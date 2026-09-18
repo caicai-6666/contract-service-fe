@@ -60,7 +60,7 @@ export function createCommunicationSession() {
   }
 
   function enqueue(conversation, text, files, userMessage) {
-    validateTurnInput(text, files)
+    validateTurnInput(text, files, (userMessage.contracts || []).map((item) => item.document_id))
     conversation.queue.push({ id: crypto.randomUUID(), text, files: [...files], userMessage, error: '', sending: false })
     scheduleQueue(conversation)
   }
@@ -185,10 +185,11 @@ export function createCommunicationSession() {
     conversation.pendingMessage = { ...userMessage, pendingSubmission: true }
     sync(conversation, false)
     try {
+      const contractIds = (userMessage.contracts || []).map((item) => item.document_id)
       const isNew = !conversation.registered
       const created = isNew
-        ? await createCommunicationConversation({ text, files, name: conversation.customName ? conversation.name : undefined, signal: lifetime.signal })
-        : await createCommunicationTurn(conversation.id, { text, files, supersedesTurnId: old?.turn_id, signal: lifetime.signal })
+        ? await createCommunicationConversation({ text, files, contractIds, name: conversation.customName ? conversation.name : undefined, signal: lifetime.signal })
+        : await createCommunicationTurn(conversation.id, { text, files, contractIds, supersedesTurnId: old?.turn_id, signal: lifetime.signal })
       if (disposed) return null
       const turn = createTurnState(created)
       turn.localSession = true

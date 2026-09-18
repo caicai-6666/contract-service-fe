@@ -1,4 +1,4 @@
-import { normalizeAuthSession } from '../models/contractPermissions.js'
+import { normalizeAuthSession } from '../models/authSession.js'
 
 const AUTH_STORAGE_KEY = 'contract-reviewer-session'
 const AUTH_EXPIRED_EVENT = 'contract-auth-expired'
@@ -29,7 +29,11 @@ export function getAuthSession() {
 
   try {
     const storedSession = normalizeAuthSession(JSON.parse(window.sessionStorage.getItem(AUTH_STORAGE_KEY)))
-    if (storedSession) memorySession = storedSession
+    if (storedSession) {
+      memorySession = storedSession
+      // 旧缓存仅保留当前认证字段，不因多余字段使有效登录失效。
+      try { window.sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(storedSession)) } catch {}
+    }
     else window.sessionStorage.removeItem(AUTH_STORAGE_KEY)
   } catch {
     try {
@@ -44,7 +48,7 @@ export function getAuthSession() {
 
 export function saveAuthSession(session) {
   const normalizedSession = normalizeAuthSession(session)
-  if (!normalizedSession) throw new TypeError('登录响应缺少有效的免登码、审核人名称或权限等级')
+  if (!normalizedSession) throw new TypeError('登录响应缺少有效的免登码或审核人名称')
 
   memorySession = normalizedSession
   try {
@@ -89,7 +93,6 @@ export async function loginWithSecretKey(secretKey, { signal } = {}) {
   const session = normalizeAuthSession({
     loginCode: payload?.login_code,
     userName: payload?.user_name,
-    permissionLevel: payload?.permission_level,
   })
   if (!session) {
     throw new ContractApiError('登录服务返回了无效的会话信息', {

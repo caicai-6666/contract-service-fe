@@ -77,8 +77,10 @@ export function turnStartTime(turn, now = Date.now()) {
   }
 }
 
-export function validateTurnInput(text, files) {
-  if (!text.trim() && !files.length) throw new Error('请输入消息或添加 PDF 附件')
+export function validateTurnInput(text, files, contractIds = []) {
+  if (!Array.isArray(contractIds) || contractIds.some((id) => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id))) throw new Error('引用合同 ID 格式无效')
+  if (files.length + contractIds.length > 10) throw new Error('每轮附件与引用合同合计最多 10 份')
+  if (!text.trim() && !files.length && !contractIds.length) throw new Error('请输入消息、添加 PDF 附件或引用合同')
   if (Array.from(text).length > 20000) throw new Error('消息不能超过 20000 个字符')
   if (files.length > 10) throw new Error('每轮最多添加 10 份 PDF')
   let total = 0

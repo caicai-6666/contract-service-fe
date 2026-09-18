@@ -48,19 +48,21 @@ async function requireResponse(response, status) {
   return payload
 }
 
-export async function createCommunicationTurn(conversationId, { text, files, supersedesTurnId, signal }) {
-  validateTurnInput(text, files)
+export async function createCommunicationTurn(conversationId, { text, files, contractIds = [], supersedesTurnId, signal }) {
+  validateTurnInput(text, files, contractIds)
   const body = new FormData()
   body.append('text', text)
+  contractIds.forEach((id) => body.append('contract_ids', id))
   files.forEach((file) => body.append('files', file, file.name))
   if (supersedesTurnId) body.append('supersedes_turn_id', supersedesTurnId)
   return requireResponse(await contractApiFetch(turnPath(conversationId), { method: 'POST', body, signal }), 201)
 }
 
-export async function createCommunicationConversation({ text, files, name, signal }) {
-  validateTurnInput(text, files)
+export async function createCommunicationConversation({ text, files, contractIds = [], name, signal }) {
+  validateTurnInput(text, files, contractIds)
   const body = new FormData()
   body.append('text', text)
+  contractIds.forEach((id) => body.append('contract_ids', id))
   files.forEach((file) => body.append('files', file, file.name))
   if (name) body.append('name', name)
   return requireResponse(await contractApiFetch(`${CONTRACT_API_BASE_PATH}/communication/conversations`, { method: 'POST', body, signal }), 201)

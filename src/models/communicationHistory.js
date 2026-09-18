@@ -1,3 +1,4 @@
+import { modelContractReferences } from './contractReferences.js'
 import { TERMINAL_TURN_STATUSES, turnDisplayMessages, interruptionPermission } from './communicationTurn.js'
 import { modelHistoryEvents } from './communicationHistoryEvents.js'
 
@@ -53,12 +54,13 @@ export function modelCommunicationHistory(data, conversationId) {
     const usesEvents = Object.hasOwn(record.payload ?? {}, 'events')
     if (!input || !(input.text === null || text(input.text)) || !Array.isArray(input.files) || (!usesEvents && !Array.isArray(trace))) return invalid()
     const attachments = input.files.map(attachment)
+    const contracts = modelContractReferences(input.contracts)
     const canInterrupt = interruptionPermission(record)
     const turn = { turn_id: turnId, status: record.status, history: true, messages: [], processing_duration_ms: record.processing_duration_ms,
       can_interrupt: canInterrupt,
       activated_at: record.activated_at == null ? null : new Date(record.activated_at).toISOString() }
     const common = { turnId, fromHistory: true }
-    messages.push({ ...common, id: `history:${record.record_id}:input`, role: 'user', content: input.text ?? '', attachments, turnStatus: record.status })
+    messages.push({ ...common, id: `history:${record.record_id}:input`, role: 'user', content: input.text ?? '', attachments, contracts, turnStatus: record.status })
     if (usesEvents) {
       const restored = modelHistoryEvents(record, conversationId)
       restored.can_interrupt = canInterrupt
@@ -105,7 +107,7 @@ export function mergeCommunicationHistory(history, localMessages, localTurns) {
   const currentMessages = localMessages.filter(message => !archived.has(message.turnId)).map(message => {
     const historical = message.role === 'user' && historyUsers.get(message.turnId)
     // 本地消息正文与 SSE 优先，但附件准入必须跟随最新 open/refresh，不能停留在初次上传状态。
-    return historical ? { ...message, attachments: historical.attachments } : message
+    return historical ? { ...message, attachments: historical.attachments, contracts: historical.contracts } : message
   })
   return [...(history?.messages ?? []).filter((message) => archived.has(message.turnId)), ...currentMessages]
 }

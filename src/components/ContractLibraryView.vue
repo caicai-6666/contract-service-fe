@@ -78,6 +78,21 @@ const conversationToDelete = ref(null)
 const conversationDeleteError = ref('')
 
 const currentConversation = computed(() => conversations.value[activeConversation.value] || conversations.value[0])
+const selectedContracts = computed({
+  get: () => currentConversation.value.draftContracts || [],
+  set: (value) => { currentConversation.value.draftContracts = value },
+})
+function toggleContractReference(contract) {
+  if (selectedContracts.value.some((item) => item.document_id === contract.id)) {
+    selectedContracts.value = selectedContracts.value.filter((item) => item.document_id !== contract.id)
+    return
+  }
+  if (selectedContracts.value.length + selectedAttachments.value.length >= 10) {
+    showAttachmentNotice('无法引用合同', '每轮附件与引用合同合计最多 10 份')
+    return
+  }
+  selectedContracts.value = [...selectedContracts.value, { document_id: contract.id, file_name: contract.name }]
+}
 const messages = computed(() => currentConversation.value.messages)
 const replying = computed(() => conversations.value[activeConversation.value]?.replying ?? false)
 const currentTurn = computed(() => {
@@ -175,7 +190,7 @@ function messageTimingLabel(message) {
 }
 const composerBusy = computed(() => !conversationVisible.value || convertingAttachments.value || currentConversation.value.cancelling || currentConversation.value.deleting || currentConversation.value.renaming)
 const taskPending = computed(() => currentConversation.value.submitting || replying.value)
-const stopMode = computed(() => taskPending.value && !prompt.value.trim() && !selectedAttachments.value.length)
+const stopMode = computed(() => taskPending.value && !prompt.value.trim() && !selectedAttachments.value.length && !selectedContracts.value.length)
 const canInterrupt = computed(() => !currentConversation.value.submitting && !currentConversation.value.cancelling && canInterruptTurn(currentTurn.value))
 const turnLabels = { failed: '本轮处理失败', expired: '轮次激活已超时，请重新发送' }
 const historyItems = computed(() => conversations.value.map((conversation) => conversation.name))
@@ -426,10 +441,11 @@ watch(() => [currentConversation.value, messages.value.findLast((message) => mes
 async function submitPrompt() {
   const content = prompt.value
   const files = [...selectedAttachments.value]
+  const contracts = selectedContracts.value.map((item) => ({ ...item }))
   const conversation = currentConversation.value
-  if ((!content.trim() && !files.length) || composerBusy.value || restoring.value) return
+  if ((!content.trim() && !files.length && !contracts.length) || composerBusy.value || restoring.value) return
   try {
-    validateTurnInput(content, files)
+    validateTurnInput(content, files, contracts.map((item) => item.document_id))
   } catch (error) {
     showAttachmentNotice('无法发送', error.message)
     return
@@ -440,6 +456,7 @@ async function submitPrompt() {
     id: crypto.randomUUID(),
     role: 'user',
     content,
+    contracts,
     attachments: files.map((file) => ({ name: file.name, size: file.size, type: file.type })),
   }
   if (conversation.submitting || conversation.replying || conversation.queue.length) {
@@ -459,7 +476,7 @@ async function submitPrompt() {
     const turn = await communication.submit(conversation, content, files, userMessage)
     if (!turn) return
     if (isInitialMessage) {
-      if (isNewConversation && !conversation.customName) conversation.name = createConversationTitle(content, files)
+      if (isNewConversation && !conversation.customName) conversation.name = createConversationTitle(content || contracts[0]?.file_name || '', files)
       if (!conversations.value.some((c) => !c.registered)) conversations.value.unshift(newConversation())
       activeConversation.value = conversations.value.findIndex((item) => item.id === conversation.id)
     }
@@ -469,6 +486,7 @@ async function submitPrompt() {
       void communication.loadHistory(conversation)
     }
   } catch (error) {
+    conversation.draftContracts = [...new Map([...contracts, ...(conversation.draftContracts || [])].map((item) => [item.document_id, item])).values()]
     if (currentConversation.value === conversation && !prompt.value && !selectedAttachments.value.length) {
       prompt.value = content
       selectedAttachments.value = files
@@ -480,6 +498,7 @@ async function submitPrompt() {
 function clearComposerDraft() {
   prompt.value = ''
   selectedAttachments.value = []
+  selectedContracts.value = []
   if (attachmentInputRef.value) attachmentInputRef.value.value = ''
   nextTick(collapseComposer)
 }
@@ -508,9 +527,12 @@ async function stopReply() {
 }
 
 function handleComposerKeydown(event) {
-  if (event.key !== 'Enter' || event.shiftKey) return
+  // 部分浏览器在输入法确认键触发时已结束 composition，仍以 229 标记该按键。
+  if (event.isComposing || event.keyCode === 229) return
+  if (event.key !== 'Enter' || !event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return
 
   event.preventDefault()
+  if (event.repeat) return
   submitPrompt()
 }
 
@@ -586,7 +608,7 @@ async function addAttachments(files) {
         const pdfFile = kind === 'pdf' ? file : await convertImageFileToPdf(file)
         if (attachmentSelectionDisposed) return
         try {
-          validateTurnInput('', [...selectedAttachments.value, pdfFile])
+          validateTurnInput('', [...selectedAttachments.value, pdfFile], selectedContracts.value.map((item) => item.document_id))
         } catch (error) {
           showAttachmentNotice(file.name, error.message)
           continue
@@ -1158,6 +1180,17 @@ onBeforeUnmount(() => {
                   class="contract-agent__message-content"
                   :content="message.content"
                 />
+                <div v-if="message.contracts?.length" class="contract-agent__contract-references">
+                  <small>引用合同 {{ message.contracts.length }}</small>
+                  <ul class="contract-agent__sent-files" aria-label="引用合同">
+                    <li v-for="contract in message.contracts" :key="contract.document_id" :title="[contract.file_name, contract.document_id, contract.summary === null ? '尚未保存摘要' : contract.summary].filter(Boolean).join('\n')">
+                      <span class="contract-agent__sent-file-content">
+                        <span class="contract-agent__sent-file-icon"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11.5 2.5h-6a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-10zm0 0v4h4M7.5 10h5M7.5 13h5" /></svg></span>
+                        <span class="contract-agent__sent-file-info"><span>{{ contract.file_name }}</span><small>引用合同</small></span>
+                      </span>
+                    </li>
+                  </ul>
+                </div>
               </template>
               <span v-if="message.role === 'user' && ['failed', 'expired'].includes(message.turnStatus)" class="communication-message-status">{{ turnLabels[message.turnStatus] }}</span>
               <ul v-if="message.references?.length" class="communication-references" aria-label="引用合同">
@@ -1225,7 +1258,8 @@ onBeforeUnmount(() => {
             <TransitionGroup tag="ul" name="queued-prompt" class="contract-agent__prompt-queue" aria-label="待发送消息">
               <li v-for="item in currentConversation.queue" :key="item.id" class="contract-agent__queued-prompt">
                 <div class="contract-agent__queued-content">
-                  <span :title="item.text || item.files.map((file) => file.name).join('、')">{{ item.text.trim() || item.files[0]?.name }}</span>
+                  <span :title="item.text || item.files.map((file) => file.name).join('、')">{{ item.text.trim() || item.files[0]?.name || item.userMessage.contracts?.[0]?.file_name }}</span>
+                  <small v-if="item.userMessage.contracts?.length">{{ item.userMessage.contracts.length }} 份引用合同</small>
                   <small v-if="item.files.length">{{ item.files.length }} 个附件</small>
                   <small v-if="item.error" class="is-error" :title="item.error">发送失败，等待重试</small>
                 </div>
@@ -1251,6 +1285,12 @@ onBeforeUnmount(() => {
               aria-label="已选附件"
               @before-leave="prepareAttachmentLeave"
             >
+              <li v-for="contract in selectedContracts" :key="contract.document_id" class="contract-agent__attachment">
+                <span class="contract-agent__attachment-name" :title="contract.file_name">{{ contract.file_name }}</span>
+                <button type="button" class="contract-agent__attachment-remove" :aria-label="`移除引用合同：${contract.file_name}`" @click="selectedContracts = selectedContracts.filter((item) => item.document_id !== contract.document_id)">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg>
+                </button>
+              </li>
               <li v-for="(file, index) in selectedAttachments" :key="attachmentSourceKeys.get(file)" class="contract-agent__attachment">
                 <button
                   type="button"
@@ -1275,7 +1315,7 @@ onBeforeUnmount(() => {
               ref="composerInputRef"
               v-model="prompt"
               rows="1"
-              placeholder="询问合同相关问题…"
+              placeholder="询问合同相关问题…（Shift + 回车发送）"
               aria-label="输入合同相关问题"
               :disabled="restoring || currentConversation.deleting || currentConversation.renaming"
               @input="resizeComposer"
@@ -1314,9 +1354,9 @@ onBeforeUnmount(() => {
                 class="contract-agent__composer-action contract-agent__composer-action--send"
                 :class="{ 'is-stop': stopMode }"
                 :type="stopMode ? 'button' : 'submit'"
-                :disabled="composerBusy || restoring || (stopMode && !canInterrupt) || (!replying && !prompt.trim() && !selectedAttachments.length)"
+                :disabled="composerBusy || restoring || (stopMode && !canInterrupt) || (!replying && !prompt.trim() && !selectedAttachments.length && !selectedContracts.length)"
                 :aria-label="stopMode ? '停止回复' : taskPending || currentConversation.queue.length ? '加入消息队列' : '发送消息'"
-                :title="stopMode ? canInterrupt ? '停止回复' : '当前任务暂不允许停止' : taskPending || currentConversation.queue.length ? '加入队列，等待当前轮次完成' : '发送消息'"
+                :title="stopMode ? canInterrupt ? '停止回复' : '当前任务暂不允许停止' : taskPending || currentConversation.queue.length ? '加入队列，等待当前轮次完成（Shift + 回车）' : '发送消息（Shift + 回车）'"
                 @click="stopMode && stopReply()"
               >
                 <Transition name="send-state" mode="out-in">
@@ -1354,7 +1394,7 @@ onBeforeUnmount(() => {
       </button>
     </section>
 
-    <ContractArchivePanel :active="active" />
+    <ContractArchivePanel :active="active" :pinned-contract-ids="selectedContracts.map((item) => item.document_id)" @pin-contract="toggleContractReference" />
     <DeleteConversationDialog
       :open="Boolean(conversationToDelete)"
       :name="conversationToDelete?.name || ''"
@@ -2142,6 +2182,8 @@ onBeforeUnmount(() => {
   border-radius: 16px;
 }
 
+.contract-agent__contract-references { margin-top: 10px; }
+.contract-agent__contract-references > small { color: #a7b8ad; font-size: 11px; }
 .contract-agent__sent-files {
   display: flex;
   flex-wrap: wrap;

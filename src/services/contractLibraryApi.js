@@ -1,15 +1,14 @@
-import { CONTRACT_API_BASE_PATH, ContractApiError, contractApiFetch, getAuthSession } from './contractApi.js'
+import { CONTRACT_API_BASE_PATH, ContractApiError, contractApiFetch } from './contractApi.js'
 import { modelContractCategories } from '../models/contractCategories.js'
 import { modelContractDocuments } from '../models/contractDocuments.js'
 
 export async function deleteContractDocument(documentId) {
-  if (getAuthSession()?.permissionLevel !== 1) throw new ContractApiError('当前账号没有删除合同的权限', { status: 403 })
   if (typeof documentId !== 'string' || !/^[a-f0-9]{64}$/.test(documentId)) throw new ContractApiError('合同文档 ID 格式无效', { status: 422 })
   const response = await contractApiFetch(`${CONTRACT_API_BASE_PATH}/contract/documents/${documentId}`, { method: 'DELETE' })
   if (response.status === 204) return
   const messages = {
     401: '登录已失效，请重新登录',
-    403: '当前账号没有删除合同的权限',
+    403: '服务端拒绝删除合同，请刷新登录后重试',
     404: '该合同已不存在，请关闭预览并刷新目录',
     409: '合同尚未完成入库，暂时不能删除',
     422: '合同文档 ID 格式无效',
@@ -19,7 +18,7 @@ export async function deleteContractDocument(documentId) {
 }
 
 export async function getContractDocuments({ signal } = {}) {
-  const response = await contractApiFetch(`${CONTRACT_API_BASE_PATH}/contract/documents`, { signal })
+  const response = await contractApiFetch(`${CONTRACT_API_BASE_PATH}/contract/documents`, { signal, cache: 'no-store' })
   const payload = await response.json().catch(() => null)
   if (response.status !== 200) {
     throw new ContractApiError(

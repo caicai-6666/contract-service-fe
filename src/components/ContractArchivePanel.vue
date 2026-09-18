@@ -5,15 +5,21 @@ import { filterContractDocuments, formatIngestionDate, resolveDocumentCategories
 import { getAuthSession } from '../services/contractApi.js'
 import ContractArchiveDateFilter from './ContractArchiveDateFilter.vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
+import ContractLinksPanel from './ContractLinksPanel.vue'
+import ContractNotesPanel from './ContractNotesPanel.vue'
+import { getContractNotes, createContractNote, deleteContractNote } from '../services/contractNotesApi.js'
+import { createContractPdfCache } from '../models/contractPdfCache.js'
 import { getContractPdf } from '../services/contractResourceApi.js'
-import { getContractPermissions } from '../models/contractPermissions.js'
 
-const props = defineProps({ active: { type: Boolean, default: true } })
+const props = defineProps({ active: { type: Boolean, default: true }, pinnedContractIds: { type: Array, default: () => [] } })
+const emit = defineEmits(['pin-contract'])
 const archiveRef = ref(null)
 const initialRequestsSettled = ref(false)
 const archiveReady = ref(false)
 let revealFrame = null
-const permissions = getContractPermissions(getAuthSession()?.permissionLevel)
+const notesSaving = ref(false)
+const notesSource = { list: getContractNotes, create: createContractNote, remove: deleteContractNote }
+const linksSaving = ref(false)
 const previewDocument = ref(null)
 const previewUrl = ref('')
 const previewLoading = ref(false)
@@ -22,6 +28,7 @@ const deletionPending = ref(false)
 const deletionError = ref('')
 let disposed = false
 let previewController = null
+const pdfCache = createContractPdfCache()
 
 function closePreview() {
   if (deletionPending.value && !disposed) return
@@ -36,8 +43,9 @@ function closePreview() {
 }
 
 async function deletePreviewDocument() {
-  if (!permissions.canDelete || deletionPending.value || !previewDocument.value) return
+  if (deletionPending.value || !previewDocument.value) return
   const documentId = previewDocument.value.id
+  const fileUri = previewDocument.value.fileUri
   deletionPending.value = true
   deletionError.value = ''
   // 删除不因弹窗关闭而取消；中途断开不能代表服务端已停止清理。
@@ -46,6 +54,7 @@ async function deletePreviewDocument() {
   documentsLoading.value = false
   try {
     await deleteContractDocument(documentId)
+    pdfCache.remove(fileUri)
     if (disposed) return
     documentModels.value = documentModels.value.filter((document) => document.id !== documentId)
     if (selectedYear.value && !documentModels.value.some((document) => document.date?.startsWith(selectedYear.value))) {
@@ -63,15 +72,19 @@ async function deletePreviewDocument() {
   }
 }
 
-async function openPreview(document) {
+async function openPreview(document, { reload = false } = {}) {
   closePreview()
   previewDocument.value = document
+  if (reload) pdfCache.remove(document.fileUri)
+  const cached = pdfCache.get(document.fileUri)
+  if (cached) { previewUrl.value = URL.createObjectURL(cached); return }
   previewLoading.value = true
   const controller = new AbortController()
   previewController = controller
   try {
     const blob = await getContractPdf(document.fileUri, { signal: controller.signal })
     if (previewController !== controller) return
+    pdfCache.set(document.fileUri, blob)
     previewUrl.value = URL.createObjectURL(blob)
   } catch (error) {
     if (previewController !== controller || error?.name === 'AbortError') return
@@ -103,10 +116,17 @@ const selectedMonth = ref('')
 const selectedDay = ref('')
 const dateFilter = computed(() => ({ year: selectedYear.value ? Number(selectedYear.value) : null, month: selectedMonth.value || null, day: selectedDay.value || null }))
 const resultsRef = ref(null)
-const categories = computed(() => [
-  { categoryId: null, code: null, name: '全部合同' },
-  ...categoryModels.value,
-])
+const categories = computed(() => {
+  const counts = new Map()
+  for (const contract of contracts.value) {
+    for (const code of contract.categoryCodes) counts.set(code, (counts.get(code) || 0) + 1)
+  }
+  const sorted = [...categoryModels.value].sort((left, right) => (
+    (counts.get(right.code) || 0) - (counts.get(left.code) || 0)
+    || left.categoryId - right.categoryId
+  ))
+  return [{ categoryId: null, code: null, name: '全部合同' }, ...sorted]
+})
 const filteredContracts = computed(() => filterContractDocuments(contracts.value, {
   categoryCode: selectedCategory.value?.code ?? null,
   year: selectedYear.value,
@@ -242,6 +262,7 @@ async function loadDocuments() {
   try {
     const models = await getContractDocuments({ signal: controller.signal })
     if (documentController !== controller) return
+    pdfCache.retain(models.map(document => document.fileUri))
     documentModels.value = models
     documentsLoaded.value = true
     if (selectedYear.value && !models.some((document) => document.date?.startsWith(selectedYear.value))) {
@@ -314,6 +335,7 @@ watch(initialRequestsSettled, async (settled) => {
 })
 onBeforeUnmount(() => {
   disposed = true
+  pdfCache.clear()
   if (revealFrame !== null) cancelAnimationFrame(revealFrame)
   closePreview()
   motionPreference.removeEventListener('change', updateMotionPreference)
@@ -447,23 +469,47 @@ watch([documentsLoading, documentsError], () => {
     </div>
   </section>
   <PdfPreviewOverlay
+    controlled-reader
+    show-pin
+    :pinned="pinnedContractIds.includes(previewDocument?.id)"
+    @pin="previewDocument && emit('pin-contract', previewDocument)"
     show-toolbar
-    :show-delete="permissions.canDelete"
+    show-notes
+    show-links
+    :notes-saving="notesSaving || linksSaving"
+    show-delete
     :open="active && Boolean(previewDocument)"
     :src="previewUrl"
     :label="previewDocument?.name || '合同'"
+    :summary-document-id="previewDocument?.id || ''"
     :loading="previewLoading"
     :error="previewError"
     :deleting="deletionPending"
     :delete-error="deletionError"
     @delete="deletePreviewDocument"
     @close="closePreview"
-    @retry="openPreview(previewDocument)"
-  />
+    @retry="openPreview(previewDocument, { reload: true })"
+  >
+    <template #links="{ close }">
+      <ContractLinksPanel v-if="previewDocument" :key="previewDocument.id" :document-id="previewDocument.id" :documents="contracts" @saving-change="linksSaving = $event" @close="close" />
+    </template>
+    <template #notes="{ close }">
+      <ContractNotesPanel
+        v-if="previewDocument"
+        :document-id="previewDocument.id"
+        :source="notesSource"
+        @close="close"
+        @saving-change="notesSaving = $event"
+        :disabled="deletionPending"
+      />
+    </template>
+  </PdfPreviewOverlay>
 </template>
 
 <style scoped>
 .contract-archive {
+  -webkit-user-select: none;
+  user-select: none;
   opacity: 0;
   transition: opacity .65s ease;
   container-type: inline-size;
