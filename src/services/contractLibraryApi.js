@@ -1,10 +1,11 @@
+import { invalidateContractData } from './contractDataRevision.js'
 import { CONTRACT_API_BASE_PATH, ContractApiError, contractApiFetch } from './contractApi.js'
 import { modelContractCategories } from '../models/contractCategories.js'
 import { modelContractDocuments } from '../models/contractDocuments.js'
 
 export async function deleteContractDocument(documentId) {
   if (typeof documentId !== 'string' || !/^[a-f0-9]{64}$/.test(documentId)) throw new ContractApiError('合同文档 ID 格式无效', { status: 422 })
-  const response = await contractApiFetch(`${CONTRACT_API_BASE_PATH}/contract/documents/${documentId}`, { method: 'DELETE' })
+  const response = await contractApiFetch(`${CONTRACT_API_BASE_PATH}/contract/documents/${documentId}`, { method: 'DELETE' }).finally(invalidateContractData)
   if (response.status === 204) return
   const messages = {
     401: '登录已失效，请重新登录',

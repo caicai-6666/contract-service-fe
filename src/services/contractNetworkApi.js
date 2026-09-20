@@ -51,8 +51,8 @@ export async function getContractRelations(documentId, { signal } = {}) {
   return payload
 }
 
-export async function getContractNetwork(documentId, documents, { signal } = {}) {
-  const relations = await getContractRelations(documentId, { signal })
+export async function getContractNetwork(documentId, documents, { signal, relations: cachedRelations } = {}) {
+  const relations = cachedRelations ?? await getContractRelations(documentId, { signal })
   const ids = new Set([documentId, ...relations.map(item => item.document_id)])
   let byId = new Map(documents.map(document => [document.document_id, document]))
   if ([...ids].some(id => !byId.has(id))) {

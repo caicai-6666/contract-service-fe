@@ -111,3 +111,28 @@ export function mergeCommunicationHistory(history, localMessages, localTurns) {
   })
   return [...(history?.messages ?? []).filter((message) => archived.has(message.turnId)), ...currentMessages]
 }
+
+
+// 历史可补齐快照没有携带的过程；不覆盖当前 SSE 正文、游标或执行状态。
+export function mergeTurnProgressHistory(turn, historical) {
+  if (!historical || historical.turn_id !== turn.turn_id || historical.event_source !== 'recorded') return
+  const entries = new Map((turn.progress_entries || []).map(entry => [entry.id, entry]))
+  const messageIds = new Set(turn.messages.map(message => message.message_id))
+  const previousAnchor = new Map()
+  let anchor = null
+  for (const message of historical.messages) {
+    if (messageIds.has(message.message_id)) anchor = message.message_id
+    previousAnchor.set(message.message_id, anchor)
+  }
+  let changed = false
+  for (const entry of historical.progress_entries || []) {
+    if (entries.has(entry.id)) continue
+    entries.set(entry.id, { ...entry, progress: { ...entry.progress }, active: false,
+      after_message_id: messageIds.has(entry.after_message_id) ? entry.after_message_id : previousAnchor.get(entry.after_message_id) ?? null })
+    changed = true
+  }
+  if (changed) turn.progress_entries = [...entries.values()].sort((a, b) => {
+    const left = BigInt(a.id.slice('progress-'.length)), right = BigInt(b.id.slice('progress-'.length))
+    return left < right ? -1 : left > right ? 1 : 0
+  })
+}

@@ -1,4 +1,6 @@
 export function createMessageScrollFollower(list, content) {
+  let active = true
+  let savedTop = list.scrollTop
   let following = true
   let frame = 0
   let lastTop = list.scrollTop
@@ -14,12 +16,12 @@ export function createMessageScrollFollower(list, content) {
     frame = 0
   }
   function schedule() {
-    if (layoutHold) return
+    if (!active || layoutHold) return
     updatePinnedHeight()
     if (!following || frame) return
     frame = requestAnimationFrame(() => {
       frame = 0
-      if (!following || layoutHold) return
+      if (!active || !following || layoutHold) return
       // 跟随实际渲染高度，不反复启动 smooth 滚动与流式逐字动画竞争。
       list.scrollTop = list.scrollHeight
       lastTop = list.scrollTop
@@ -61,8 +63,9 @@ export function createMessageScrollFollower(list, content) {
     if (follow) resume()
   }
   function listen(type, handler) {
-    list.addEventListener(type, handler, { passive: true })
-    listeners.push([type, handler])
+    const guarded = event => { if (active) handler(event) }
+    list.addEventListener(type, guarded, { passive: true })
+    listeners.push([type, guarded])
   }
   listen('scroll', () => {
     const top = list.scrollTop
@@ -89,11 +92,34 @@ export function createMessageScrollFollower(list, content) {
   // 用户消息已经上移，但 ResizeObserver 不会收到容器尺寸变化。
   const contentObserver = new MutationObserver(schedule)
   contentObserver.observe(content, { childList: true, subtree: true })
+  function suspend() {
+    if (!active) return
+    savedTop = list.scrollTop
+    active = false
+    cancelAnimationFrame(frame)
+    frame = 0
+    clearTimeout(layoutHoldTimer)
+    layoutHold = false
+    observer.disconnect()
+    contentObserver.disconnect()
+  }
+  function activate() {
+    if (active) return
+    active = true
+    updatePinnedHeight()
+    list.scrollTop = savedTop
+    lastTop = list.scrollTop
+    observer.observe(content)
+    observer.observe(list)
+    contentObserver.observe(content, { childList: true, subtree: true })
+    schedule()
+  }
   schedule()
   return {
-    pause, resume, pin, clearPin, holdLayout,
+    pause, resume, pin, clearPin, holdLayout, suspend, activate,
     isFollowing: () => following,
     dispose() {
+      active = false
       pause()
       clearTimeout(layoutHoldTimer)
       observer.disconnect()

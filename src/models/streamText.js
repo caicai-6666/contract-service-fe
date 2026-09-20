@@ -46,7 +46,7 @@ export function createStreamText({ initial = '', onChange, requestFrame, cancelF
     }
     units = Array.from(segmenter.segment(text.slice(shown.length)), (part) => part.segment)
     offset = 0
-    remainingTime = 180
+    if (frame === null) remainingTime = 180
     if (shown !== target && frame === null) frame = requestFrame(tick)
   }
 

@@ -1,3 +1,10 @@
+export function nextContractNetworkHistory(history, currentId, nextId) {
+  if (!currentId || currentId === nextId) return history
+  // 点击上一个中心视为原路返回，避免 A → B → A → B 堆积重复轨迹。
+  if (history.at(-1) === nextId) return history.slice(0, -1)
+  return [...history, currentId]
+}
+
 export function normalizeContractNetwork(payload) {
   const nodes = [...new Map(payload.nodes.map(node => [node.document_id, node])).values()]
   const ids = new Set(nodes.map(node => node.document_id))

@@ -1,3 +1,4 @@
+import { invalidateContractData } from './contractDataRevision.js'
 import { CONTRACT_API_BASE_PATH, ContractApiError, contractApiFetch } from './contractApi.js'
 
 const documentPattern = /^[a-f0-9]{64}$/
@@ -31,7 +32,7 @@ export async function createContractRelation({ document_id_a, document_id_b, des
   } catch (error) {
     if (error instanceof ContractApiError) throw error
     throw new ContractApiError('连接中断，新增结果未确认，请刷新关联列表核对后再提交')
-  }
+  } finally { invalidateContractData() }
   const payload = await response.json().catch(() => null)
   if (response.status !== 201) throw failure(response, payload, true)
   const endpoints = [document_id_a, document_id_b].sort()
@@ -52,7 +53,7 @@ export async function deleteContractRelation(relationId) {
   } catch (error) {
     if (error instanceof ContractApiError) throw error
     throw new ContractApiError('连接中断，删除结果未确认，请刷新关联列表核对')
-  }
+  } finally { invalidateContractData() }
   if (response.status === 204) return
   throw failure(response, await response.json().catch(() => null), false)
 }

@@ -5,6 +5,8 @@ import { getContractSummary } from '../services/contractSummaryApi.js'
 const props = defineProps({
   documentId: { type: String, required: true },
   active: { type: Boolean, default: true },
+  source: { type: Function, default: getContractSummary },
+  revision: { type: Number, default: 0 },
 })
 const summary = ref(null)
 const loading = ref(false)
@@ -20,7 +22,7 @@ async function loadSummary() {
   error.value = ''
   summary.value = null
   try {
-    const result = await getContractSummary(props.documentId, { signal: request.signal })
+    const result = await props.source(props.documentId, { signal: request.signal })
     if (!request.signal.aborted && controller === request) summary.value = result
   } catch (reason) {
     if (!request.signal.aborted && controller === request) error.value = reason.message || '摘要加载失败，请重试'
@@ -28,7 +30,7 @@ async function loadSummary() {
     if (controller === request) loading.value = false
   }
 }
-watch(() => [props.documentId, props.active], loadSummary, { immediate: true })
+watch(() => [props.documentId, props.active, props.revision], loadSummary, { immediate: true })
 onBeforeUnmount(() => controller?.abort())
 </script>
 

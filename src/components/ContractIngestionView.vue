@@ -18,6 +18,7 @@ import ContractDateWheel from './ContractDateWheel.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
 import BatchExtractionDialog from './BatchExtractionDialog.vue'
+import { serializeCoreProperty, validateCoreProperty } from '../models/coreDefinitions.js'
 import { deduplicationInteraction } from '../models/deduplicationReview.js'
 import { awaitsExtractionFollowup } from '../models/extractionEventLifecycle.js'
 import { getSelectedFileKind, convertImageFileToPdf } from '../services/local-file-pdf.js'
@@ -1150,8 +1151,8 @@ function syncReviewOverviewFromSuggestion() {
     : stripPdfSuffix(selectedFileName.value).trim()
 }
 
-async function ensureCoreDefinitions(signal) {
-  if (coreDefinitionsReady.value) return
+async function ensureCoreDefinitions(signal, { force = false } = {}) {
+  if (coreDefinitionsReady.value && !force) return
   coreDefinitionsLoading.value = true
   try {
     const definitions = await getCoreDefinitions({ signal })
@@ -1867,8 +1868,8 @@ async function restoreExtractionRun(run) {
   runsRestoreErrorId.value = ''
 
   try {
-    const [, snapshot] = await Promise.all([
-      ensureCoreDefinitions(controller.signal),
+    const [definitions, snapshot] = await Promise.all([
+      getCoreDefinitions({ signal: controller.signal }),
       getExtractionSnapshot(run.run_id, { signal: controller.signal }),
     ])
     if (runRestoreController !== controller) return
@@ -1876,6 +1877,8 @@ async function restoreExtractionRun(run) {
       throw new Error('后台任务快照与所选合同不一致')
     }
 
+    coreDefinitions.value = definitions
+    coreDefinitionsReady.value = true
     const canKeepLocalInput = currentRunId.value === run.run_id && selectedSourceFile.value
     closeRunsPanel()
     resetWorkflowState()
@@ -2184,7 +2187,7 @@ async function startWorkflow() {
   uploadInProgress.value = true
 
   try {
-    await ensureCoreDefinitions(controller.signal)
+    await ensureCoreDefinitions(controller.signal, { force: true })
     if (generation !== streamGeneration) return
     const snapshot = await createExtractionRun(selectedFile.value, {
       signal: controller.signal,
@@ -2423,11 +2426,17 @@ function selectBooleanReviewValue(definition, itemIndex, property, rawValue) {
 function updateCoreReviewValue(definition, itemIndex, property, event) {
   const item = coreReviewModel.get(definition.code)?.[itemIndex]
   if (!item) return
-  const rawValue = event.target.value
+  const rawValue = event.target.validity?.badInput ? Number.NaN : event.target.value
   item[property.code] = property.type === 'boolean'
     ? rawValue === '' ? null : rawValue === 'true'
     : rawValue
   modifiedFields.add(coreReviewPath(definition.code, itemIndex, property.code))
+}
+
+function selectEnumReviewValue(definition, itemIndex, property, event) {
+  updateCoreReviewValue(definition, itemIndex, property, event)
+  openBooleanControlKey.value = ''
+  event.target.closest('.extraction-result-enum')?.querySelector('button')?.focus()
 }
 
 function updateSigningDateValue(definition, itemIndex, property, value) {
@@ -2445,14 +2454,6 @@ function updateReviewFileName(event) {
 function updateReviewSummary(value) {
   reviewSummary.value = value
   reviewSummaryModified.value = true
-}
-
-function serializeCoreProperty(value, type) {
-  if (value === null || value === undefined || (typeof value === 'string' && !value.trim())) return null
-  if (type === 'integer') return Number.parseInt(value, 10)
-  if (type === 'number') return Number(value)
-  if (type === 'boolean') return value === true || value === 'true'
-  return String(value)
 }
 
 function serializeCoreReview() {
@@ -2474,7 +2475,7 @@ function serializeCoreReview() {
     }
     const item = serializedItems[0] || emptyCoreReviewItem(definition)
     if (definition.properties.length === 1) {
-      return [definition.code, item[definition.properties[0].code]]
+      return [definition.code, item[definition.properties[0].code] ?? null]
     }
     return [definition.code, Object.values(item).some((value) => value !== null) ? item : null]
   }))
@@ -2509,6 +2510,12 @@ function validateIngestionDraft(core, clauses) {
       })
     }
     for (const [itemIndex, item] of items.entries()) {
+      for (const property of definition.properties) {
+        const target = coreReviewPath(definition.code, itemIndex, property.code)
+        for (const error of validateCoreProperty(property, item?.[property.code])) {
+          issues.push(ingestionIssue(`${target}:${error.code}`, `“${definition.name}”中的“${property.name}”${error.message}`, target))
+        }
+      }
       definition.properties.filter((property) => (
         (property.required || isSigningDateProperty(property)) && !coreReviewValuePresent(item?.[property.code])
       )).forEach((property) => {
@@ -2625,6 +2632,8 @@ function localizedIngestionDetail(detail) {
   if (type.includes('bool_')) return `${label}必须选择“是”或“否”`
   if (type === 'greater_than_equal') return `${label}不能小于允许的最小值`
   if (type === 'less_than_equal') return `${label}不能超过允许的最大值`
+  if (type === 'multiple_of') return `${label}不符合要求的数值倍数`
+  if (['enum', 'literal_error'].includes(type)) return `${label}请选择列表中的有效选项`
   if (type === 'list_type') return `${label}必须是列表`
   if (type === 'dict_type') return `${label}必须是完整对象`
 
@@ -2893,8 +2902,8 @@ function coreReviewItemKey(definitionCode, item, itemIndex) {
   return coreReviewItemKeys.get(item)
 }
 
-function corePropertyStep(type) {
-  return type === 'integer' ? '1' : 'any'
+function corePropertyStep(property) {
+  return property.constraints?.multiple_of ?? (property.type === 'integer' ? 1 : 'any')
 }
 
 function isCoreNumericProperty(type) {
@@ -2907,10 +2916,14 @@ function adjustCoreReviewNumber(definition, itemIndex, property, direction) {
 
   const currentValue = Number(item[property.code])
   const numericValue = Number.isFinite(currentValue) ? currentValue : 0
-  const nextValue = numericValue + direction
-  item[property.code] = property.type === 'integer'
-    ? Math.trunc(nextValue)
-    : Number(nextValue.toFixed(10))
+  const step = property.constraints?.multiple_of ?? 1
+  let nextValue = Number((numericValue + direction * step).toPrecision(15))
+  const minimum = property.constraints?.minimum
+  const maximum = property.constraints?.maximum
+  if (minimum != null && nextValue < minimum && direction > 0) nextValue = Number((Math.ceil(minimum / step) * step).toPrecision(15))
+  if (maximum != null && nextValue > maximum && direction < 0) nextValue = Number((Math.floor(maximum / step) * step).toPrecision(15))
+  if (validateCoreProperty(property, nextValue).length) return
+  item[property.code] = nextValue
   modifiedFields.add(coreReviewPath(definition.code, itemIndex, property.code))
 }
 
@@ -4403,8 +4416,46 @@ onBeforeUnmount(() => {
                       {{ property.name }}<b v-if="isSigningDateProperty(property)">入库必填</b><b v-else-if="property.required">对象内必填</b>
                       <i v-if="modifiedFields.has(coreReviewPath(field.code, itemIndex, property.code))">已修改</i>
                     </span>
+                    <div
+                      v-if="property.constraints?.enum"
+                      class="extraction-result-boolean-control extraction-result-enum"
+                      :class="{ 'is-open': openBooleanControlKey === booleanReviewControlKey(field.code, itemIndex, property.code) }"
+                      @click.stop
+                      @keydown.esc.stop="openBooleanControlKey = ''; $event.currentTarget.querySelector('button').focus()"
+                      @focusout="!$event.currentTarget.contains($event.relatedTarget) && (openBooleanControlKey = '')"
+                    >
+                      <button
+                        type="button"
+                        class="extraction-result-boolean-control__trigger"
+                        :aria-label="property.name"
+                        :title="property.extraction_rule"
+                        :aria-expanded="openBooleanControlKey === booleanReviewControlKey(field.code, itemIndex, property.code)"
+                        :disabled="Boolean(ingestionReceipt)"
+                        @click="toggleBooleanReviewControl(field.code, itemIndex, property.code)"
+                      >
+                        <span>{{ property.constraints.enum.find(option => option.value === coreReviewInputValue(field.code, itemIndex, property))?.label || (coreReviewValuePresent(coreReviewInputValue(field.code, itemIndex, property)) ? '原值无效，请重新选择' : '未填写') }}</span>
+                        <i aria-hidden="true"></i>
+                      </button>
+                      <div class="extraction-result-boolean-control__expander">
+                        <div class="extraction-result-boolean-control__options extraction-result-enum__options" role="radiogroup" :aria-label="property.name">
+                          <template v-for="(option, optionIndex) in [{ value: '', label: '未填写' }, ...property.constraints.enum]" :key="option.value">
+                            <input
+                              :id="booleanReviewOptionId(field.code, itemIndex, property.code, optionIndex)"
+                              :name="booleanReviewControlKey(field.code, itemIndex, property.code)"
+                              type="radio"
+                              :value="option.value"
+                              :checked="coreReviewInputValue(field.code, itemIndex, property) === option.value"
+                              :disabled="Boolean(ingestionReceipt)"
+                              :tabindex="openBooleanControlKey === booleanReviewControlKey(field.code, itemIndex, property.code) ? 0 : -1"
+                              @change="selectEnumReviewValue(field, itemIndex, property, $event)"
+                            />
+                            <label :for="booleanReviewOptionId(field.code, itemIndex, property.code, optionIndex)">{{ option.label }}</label>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
                     <ContractDateWheel
-                      v-if="isSigningDateProperty(property)"
+                      v-else-if="isSigningDateProperty(property)"
                       :model-value="coreReviewInputValue(field.code, itemIndex, property)"
                       :disabled="Boolean(ingestionReceipt)"
                       :required="property.required && coreReviewItemActive(field.code, itemIndex)"
@@ -4466,7 +4517,11 @@ onBeforeUnmount(() => {
                     >
                       <input
                         type="number"
-                        :step="corePropertyStep(property.type)"
+                        :step="corePropertyStep(property)"
+                        :min="property.constraints?.minimum ?? undefined"
+                        :max="property.constraints?.maximum ?? undefined"
+                        :aria-label="property.name"
+                        :title="property.extraction_rule"
                         :value="coreReviewInputValue(field.code, itemIndex, property)"
                         :required="property.required && coreReviewItemActive(field.code, itemIndex)"
                         :placeholder="`请输入${property.name}`"
@@ -4748,6 +4803,8 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+
+
 .contract-ingestion {
   position: relative;
   display: flex;
@@ -10678,5 +10735,42 @@ onBeforeUnmount(() => {
       linear-gradient(135deg, #bd8e2d, #9f6e1d) padding-box,
       linear-gradient(135deg, #9070ff, #f06bcf) border-box;
   }
+}
+
+.extraction-result-enum__options {
+  grid-template-rows: none;
+  grid-auto-rows: minmax(38px, auto);
+  max-height: 240px;
+  padding: 5px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #d1aa55 transparent;
+}
+
+.extraction-result-enum__options label {
+  display: flex;
+  justify-content: flex-start;
+  padding: 9px 12px;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.extraction-result-enum__options label:hover,
+.extraction-result-enum__options input:checked + label {
+  background: linear-gradient(135deg, rgb(235 205 122 / 48%), #d1aa55e8);
+  box-shadow: inset 0 0 9px rgb(255 239 183 / 24%);
+}
+
+.extraction-result-enum__options input:focus-visible + label {
+  outline: 2px solid #ffe594;
+  outline-offset: -2px;
+}
+
+.extraction-result-enum__options input:checked + label::after {
+  content: '✓';
+  margin-left: auto;
+  padding-left: 12px;
 }
 </style>

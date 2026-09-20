@@ -22,6 +22,9 @@ export function createContractPdfCache({ maxEntries = 5, maxBytes = 100 * 1024 *
       bytes += blob.size
     },
     remove,
+    removeWhere(predicate) {
+      for (const key of entries.keys()) if (predicate(key)) remove(key)
+    },
     retain(keys) {
       const retained = new Set(keys)
       for (const key of entries.keys()) if (!retained.has(key)) remove(key)

@@ -8,6 +8,7 @@ import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
 import ContractLinksPanel from './ContractLinksPanel.vue'
 import ContractNotesPanel from './ContractNotesPanel.vue'
 import { getContractNotes, createContractNote, deleteContractNote } from '../services/contractNotesApi.js'
+import { contractIngestionRevision } from '../services/contractDataRevision.js'
 import { createContractPdfCache } from '../models/contractPdfCache.js'
 import { getContractPdf } from '../services/contractResourceApi.js'
 
@@ -278,6 +279,11 @@ async function loadDocuments() {
     }
   }
 }
+
+// 工作台页面保持挂载；入库后即使目录不可见，也立即获取最新列表。
+watch(contractIngestionRevision, () => {
+  if (!disposed) void Promise.all([loadCategories(), loadDocuments()])
+})
 
 watch(() => props.active, (active) => {
   if (!active) closePreview()

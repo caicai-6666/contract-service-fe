@@ -1,7 +1,11 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { getContractNetwork, getNetworkDocuments } from '../services/contractNetworkApi.js'
+import { getContractNetwork, getNetworkDocuments, getContractRelations } from '../services/contractNetworkApi.js'
 import ContractSummaryDetail from './ContractSummaryDetail.vue'
+import { nextContractNetworkHistory } from '../models/contractNetwork.js'
+import { getContractSummary } from '../services/contractSummaryApi.js'
+import { createAsyncResourceCache } from '../models/asyncResourceCache.js'
+import { contractDataRevision } from '../services/contractDataRevision.js'
 import sleepImage from '../assets/sleep.webp'
 
 const props = defineProps({ active: { type: Boolean, default: true } })
@@ -33,6 +37,15 @@ const catalogLoading = ref(false)
 const refreshSpinning = ref(false)
 const catalogLoaded = ref(false)
 const catalogError = ref('')
+const relationCache = createAsyncResourceCache()
+const summaryCache = createAsyncResourceCache()
+const summaryRevision = ref(0)
+function loadCachedSummary(id) {
+  return summaryCache.load(id, signal => getContractSummary(id, { signal }))
+}
+function clearNetworkCache() {
+  relationCache.clear(); summaryCache.clear(); summaryRevision.value++
+}
 let catalogController
 const center = computed(() => network.value?.nodes.find(node => node.document_id === network.value.center_document_id))
 const results = computed(() => {
@@ -123,10 +136,12 @@ async function initialize() {
   if (!catalogLoaded.value && !catalogLoading.value) void loadCatalog()
   try { await ensureScene(); if (!lastRequestedId) error.value = '' } catch { error.value = '无法加载三维视图，请重试' }
 }
-function refreshCatalog() {
+async function refreshCatalog() {
   if (catalogLoading.value || loading.value || refreshSpinning.value) return
   refreshSpinning.value = !window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  void loadCatalog()
+  clearNetworkCache()
+  await loadCatalog()
+  if (!disposed && props.active && !catalogError.value && center.value) await select(center.value.document_id, false, true)
 }
 function finishRefreshTurn() {
   if (!catalogLoading.value) refreshSpinning.value = false
@@ -161,20 +176,24 @@ async function select(id, goingBack = false, refresh = false) {
   controller = new AbortController()
   loading.value = true; error.value = ''; detail.value = null
   try {
-    const result = await getContractNetwork(id, networkContracts.value, { signal: controller.signal })
+    const signal = controller.signal
+    const relations = await relationCache.load(id, signal => getContractRelations(id, { signal }))
+    signal.throwIfAborted()
+    const result = await getContractNetwork(id, networkContracts.value, { signal, relations })
     const instance = await ensureScene()
     if (version !== requestVersion || disposed || !instance) return
-    if (!goingBack && center.value && center.value.document_id !== id) history.value.push(center.value.document_id)
-    if (goingBack) history.value.pop()
+    history.value = goingBack
+      ? history.value.slice(0, -1)
+      : nextContractNetworkHistory(history.value, center.value?.document_id, id)
     networkContracts.value = result.documents; catalogLoaded.value = true; catalogError.value = ''
     network.value = result.network
-    query.value = center.value?.file_name || ''
+    if (!refresh) query.value = center.value?.file_name || ''
     inspection.value = { type: 'contract', id }
     instance.setData(result.network)
   } catch (reason) {
     if (reason.name !== 'AbortError' && version === requestVersion) {
       error.value = reason instanceof TypeError ? '无法连接合同目录服务，请重试' : reason.message || '关系网加载失败，请重试'
-      query.value = center.value?.file_name || ''
+      if (!refresh) query.value = center.value?.file_name || ''
     }
   } finally {
     if (version === requestVersion) loading.value = false
@@ -212,14 +231,18 @@ function reset() {
 }
 function viewport(action) { scene?.viewport(action) }
 function visibilityChanged() { scene?.setActive(props.active && !document.hidden) }
-function retry() { lastRequestedId ? void select(lastRequestedId) : void initialize() }
+function retry() { relationCache.clear(); lastRequestedId ? void select(lastRequestedId) : void initialize() }
 function formatBeijingTime(value) {
   return value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(new Date(value)) : '—'
 }
 watch(() => props.active, async active => {
-  if (active) { await nextTick(); updateResizeMetrics(); await initialize(); scene?.resize(); if (props.active && center.value) await select(center.value.document_id, false, true) }
+  if (active) { await nextTick(); updateResizeMetrics(); await initialize(); scene?.resize(); if (props.active && center.value && !relationCache.has(center.value.document_id)) await select(center.value.document_id, false, true) }
   else finishResize()
   visibilityChanged()
+})
+watch(contractDataRevision, () => {
+  clearNetworkCache()
+  if (props.active && center.value) void select(center.value.document_id, false, true)
 })
 onMounted(() => {
   layoutObserver = new ResizeObserver(updateResizeMetrics)
@@ -228,7 +251,7 @@ onMounted(() => {
   if (props.active) void initialize()
   document.addEventListener('visibilitychange', visibilityChanged)
 })
-onBeforeUnmount(() => { disposed = true; finishResize(); layoutObserver?.disconnect(); catalogController?.abort(); controller?.abort(); observer?.disconnect(); scene?.destroy(); document.removeEventListener('visibilitychange', visibilityChanged) })
+onBeforeUnmount(() => { disposed = true; relationCache.clear(); summaryCache.clear(); finishResize(); layoutObserver?.disconnect(); catalogController?.abort(); controller?.abort(); observer?.disconnect(); scene?.destroy(); document.removeEventListener('visibilitychange', visibilityChanged) })
 </script>
 
 <template>
@@ -261,7 +284,7 @@ onBeforeUnmount(() => { disposed = true; finishResize(); layoutObserver?.disconn
             <div v-if="inspectedContract" :key="inspectedContract.document_id" class="network-inspector-content">
               <h2>{{ inspectedContract.file_name }}</h2>
               <dl class="network-metadata">
-                <div><dt>合同摘要</dt><dd><ContractSummaryDetail :document-id="inspectedContract.document_id" :active="active" /></dd></div>
+                <div><dt>合同摘要</dt><dd><ContractSummaryDetail :document-id="inspectedContract.document_id" :active="active" :source="loadCachedSummary" :revision="summaryRevision" /></dd></div>
                 <div><dt>合同类别</dt><dd>{{ inspectedContract.category || '—' }}</dd></div>
                 <div><dt>审核人</dt><dd>{{ inspectedContract.reviewer || '—' }}</dd></div>
                 <div><dt>签署日期</dt><dd>{{ inspectedContract.date || '—' }}</dd></div>

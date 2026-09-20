@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { modelCommunicationHistory, mergeCommunicationHistory } from '../models/communicationHistory.js'
+import { modelCommunicationHistory, mergeCommunicationHistory, mergeTurnProgressHistory } from '../models/communicationHistory.js'
 import { getCommunicationHistory } from './communicationApi.js'
 import { renameCommunicationConversation, deleteCommunicationConversation, validateConversationName } from './communicationApi.js'
 import { getAuthSession } from './contractApi.js'
@@ -37,6 +37,9 @@ export function createCommunicationSession() {
 
   function sync(conversation, save = true) {
     if (conversation.removed) return
+    for (const turn of conversation.turns) {
+      mergeTurnProgressHistory(turn, conversation.history?.turns.find(item => item.turn_id === turn.turn_id))
+    }
     const users = [...new Map([...(conversation.localUsers ?? []), ...conversation.messages.filter((m) => m.role === 'user' && !m.fromHistory && !m.pendingSubmission)].map((message) => [message.id, message])).values()]
     conversation.localUsers = users
     const localMessages = users.flatMap((user) => {

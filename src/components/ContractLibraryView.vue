@@ -16,9 +16,11 @@ import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
 import DeleteConversationDialog from './DeleteConversationDialog.vue'
 import onlineSearchImage from '../assets/online-search.webp'
 import localSearchImage from '../assets/local-search.webp'
+import externalExpertImage from '../assets/expert.webp'
 import { taskProgressPresentation } from '../models/communicationProgress.js'
 import { getSelectedFileKind, convertImageFileToPdf } from '../services/local-file-pdf.js'
 import { clipboardFiles } from '../services/clipboardFiles.js'
+import { createCommunicationPdfCache } from '../models/communicationPdfCache.js'
 import { canPreviewCommunicationFile, getCommunicationPdf } from '../services/communicationResourceApi.js'
 import { createCommunicationSession, newConversation } from '../services/communicationSession.js'
 import { createMessageScrollFollower } from '../services/messageScrollFollower.js'
@@ -51,6 +53,7 @@ const attachmentPreviewFile = ref(null)
 const attachmentPreviewUrl = ref('')
 const attachmentPreviewError = ref('')
 const attachmentPreviewLoading = ref(false)
+const attachmentPdfCache = createCommunicationPdfCache()
 let attachmentPreviewRequest = null
 const activeConversation = computed({
   get: () => Math.max(0, conversations.value.findIndex((c) => c.id === communication.selectedConversationId.value)),
@@ -61,6 +64,9 @@ const previewQuestion = ref(null)
 const previewTop = ref(0)
 const initialMessageId = ref(null)
 const enteringMessageIds = ref(new Set())
+const delayedProgressIds = ref(new Set())
+const tailActivityRef = ref(null)
+let tailActivityLeavePosition = null
 const expandedProcessIds = ref(new Set())
 const copiedMessageId = ref(null)
 const contractLibraryRef = ref(null)
@@ -117,8 +123,7 @@ function canCopyMessage(message) {
   return Boolean(last && message.id === `${turn.turn_id}:${last.message_id}`)
 }
 const expandedTurnProcesses = ref(new Set())
-const startedFinalTurns = computed(() => new Set(displayTurns.value.filter(hasStartedFinal).map((turn) => turn.turn_id)))
-const collapsedProcessTurns = computed(() => new Set(displayTurns.value.filter(shouldCollapseTurnProcess).map((turn) => turn.turn_id)))
+const collapsedProcessTurns = computed(() => new Set(displayTurns.value.filter(turn => shouldCollapseTurnProcess(turn, messageDisplayStates.value)).map((turn) => turn.turn_id)))
 const processToggleTurns = computed(() => new Set(messages.value
   .filter((message) => message.messageKind === 'intermediate' && collapsedProcessTurns.value.has(message.turnId))
   .map((message) => message.turnId)))
@@ -156,18 +161,40 @@ function toggleTurnProcess(turnId) {
   expandedTurnProcesses.value = expanded
 }
 
-const progressImages = { 'online-search': onlineSearchImage, 'local-search': localSearchImage }
+const progressImages = { 'online-search': onlineSearchImage, 'local-search': localSearchImage, 'external-expert': externalExpertImage }
 const thinkingActivity = { type: 'thinking', text: '正在思考', thinking: true }
 const tailActivity = computed(() => {
   if (currentConversation.value.submitting) return thinkingActivity
-  if (!replying.value || ['recovering', 'disconnected'].includes(currentTurn.value?.connection)) return null
+  if (!replying.value || !currentTurn.value || currentTurn.value.unavailable
+    || !['pending_activation', 'processing'].includes(currentTurn.value.status)
+    || ['recovering', 'disconnected'].includes(currentTurn.value.connection)) return null
   if (hasStartedFinal(currentTurn.value)) return null
   const progress = currentTurn.value?.active_progress
   // 检索状态从开始就留在消息序列中，结束只变灰，不在尾部再渲染一份。
-  if (progress) return progress.type === 'thinking' ? thinkingActivity : null
+  if (progress) return progress.type === 'thinking' ? taskProgressPresentation(progress) : null
   if (!messages.value.some((message) => message.status === 'streaming')) return thinkingActivity
   return null
 })
+// 在 DOM 更新前记录思考提示的位置，退场时不被新增状态挤到下一行。
+watch(() => [currentConversation.value.id, messages.value, tailActivity.value], ([conversationId, nextMessages, activity], previous) => {
+  if (!previous || previous[0] !== conversationId) return
+  if (previous[2] && !activity && tailActivityRef.value) {
+    const element = tailActivityRef.value
+    tailActivityLeavePosition = { top: `${element.offsetTop}px`, left: `${element.offsetLeft}px`, width: `${element.offsetWidth}px` }
+  }
+  if (!props.active || currentConversation.value.historyLoading) return
+  const knownIds = new Set(previous[1].map(message => message.id))
+  for (const message of nextMessages) {
+    if (!message.settledProgress || !message.progressActive || message.fromHistory || knownIds.has(message.id)) continue
+    if (previous[2]?.thinking) delayedProgressIds.value = new Set([...delayedProgressIds.value, message.id])
+    markMessageEntering(message.id)
+  }
+})
+
+function freezeLeavingActivity(element) {
+  if (tailActivityLeavePosition) Object.assign(element.style, tailActivityLeavePosition)
+}
+
 const processingClock = ref(Date.now())
 let processingTimer = null
 watch(
@@ -362,6 +389,7 @@ async function confirmConversationDelete(confirmation) {
   conversationDeleteError.value = ''
   try {
     await communication.deleteConversation(conversation)
+    attachmentPdfCache.removeConversation(conversation.id)
     closeConversationDelete()
   } catch (error) {
     if (error.name !== 'AbortError') conversationDeleteError.value = error.message
@@ -387,6 +415,9 @@ function markMessageEntering(messageIdValue) {
     const remainingIds = new Set(enteringMessageIds.value)
     remainingIds.delete(messageIdValue)
     enteringMessageIds.value = remainingIds
+    const delayedIds = new Set(delayedProgressIds.value)
+    delayedIds.delete(messageIdValue)
+    delayedProgressIds.value = delayedIds
     messageEntryTimers.delete(messageIdValue)
   }, 700)
   messageEntryTimers.set(messageIdValue, timer)
@@ -660,7 +691,8 @@ async function previewSentAttachment(file, message) {
   attachmentPreviewLoading.value = true
   const conversationId = currentConversation.value.id
   try {
-    const blob = await getCommunicationPdf(conversationId, file.fileId, { signal: controller.signal })
+    const blob = await attachmentPdfCache.load(conversationId, file.fileId,
+      signal => getCommunicationPdf(conversationId, file.fileId, { signal }))
     if (controller.signal.aborted || attachmentPreviewRequest !== controller || currentConversation.value.id !== conversationId) return
     attachmentPreviewUrl.value = URL.createObjectURL(blob)
   } catch (error) {
@@ -825,8 +857,10 @@ async function activateLibraryView() {
   if (libraryViewActive) return
   libraryViewActive = true
   await nextTick()
+  if (!libraryViewActive || !props.active) return
   updateResizeMetrics()
-  messageScrollFollower = createMessageScrollFollower(messageListRef.value, messageContentRef.value)
+  if (messageScrollFollower) messageScrollFollower.activate()
+  else messageScrollFollower = createMessageScrollFollower(messageListRef.value, messageContentRef.value)
   setupHistoryPull()
   libraryResizeObserver = new ResizeObserver(updateResizeMetrics)
   libraryResizeObserver.observe(contractLibraryRef.value)
@@ -840,8 +874,7 @@ function deactivateLibraryView() {
   libraryViewActive = false
   disposeHistoryPull?.()
   disposeHistoryPull = null
-  messageScrollFollower?.dispose()
-  messageScrollFollower = null
+  messageScrollFollower?.suspend()
   libraryResizeObserver?.disconnect()
   libraryResizeObserver = null
   window.removeEventListener('resize', updateResizeMetrics)
@@ -866,7 +899,10 @@ onBeforeUnmount(() => {
   revealRevision += 1
   window.clearInterval(processingTimer)
   communication.dispose()
+  messageScrollFollower?.dispose()
+  messageScrollFollower = null
   attachmentSelectionDisposed = true
+  attachmentPdfCache.clear()
   attachmentNoticeTimers.forEach((timer) => window.clearTimeout(timer))
   attachmentNoticeTimers.clear()
   deactivateLibraryView()
@@ -1080,12 +1116,14 @@ onBeforeUnmount(() => {
                 {
                   'is-new-conversation-entry': message.id === initialMessageId,
                   'is-message-entry': enteringMessageIds.has(message.id),
+                  'is-progress-entry': Boolean(message.settledProgress) && enteringMessageIds.has(message.id),
+                  'is-progress-after-thinking': delayedProgressIds.has(message.id),
                 },
               ]"
             >
               <div v-if="message.settledProgress" class="communication-step" :class="{ 'communication-step--settled': !message.progressActive }">
-                <img class="communication-progress-icon" :src="progressImages[message.settledProgress.type]" width="18" height="18" alt="" aria-hidden="true" />
-                <span>{{ taskProgressPresentation(message.settledProgress).text }}</span>
+                <img class="communication-progress-icon" :src="progressImages[message.settledProgress.type]" width="16" height="16" alt="" aria-hidden="true" />
+                <span>{{ taskProgressPresentation(message.settledProgress, Boolean(message.progressActive)).text }}</span>
               </div>
               <div v-else-if="message.historyError" class="communication-status" role="alert"><p class="is-error">{{ message.content }}</p></div>
               <div v-else-if="message.role === 'assistant'" class="contract-agent__response">
@@ -1130,6 +1168,7 @@ onBeforeUnmount(() => {
                   class="contract-agent__message-content"
                   :content="message.content"
                   :stream-state="message.status"
+                  :beautify-links="message.messageKind === 'final' && displayTurns.some(turn => turn.turn_id === message.turnId && turn.status === 'completed')"
                   stabilize-height
                   :animate="active && !message.fromHistory"
                   @display-state="updateMessageDisplay(message.id, $event)"
@@ -1236,15 +1275,16 @@ onBeforeUnmount(() => {
               </template>
             </div>
 
-            <Transition name="tail-activity" mode="out-in">
+            <Transition name="tail-activity" mode="out-in" @before-leave="freezeLeavingActivity">
               <article
                 v-if="tailActivity"
+                ref="tailActivityRef"
                 :key="tailActivity.type"
                 class="contract-agent__message contract-agent__message--assistant communication-thinking"
                 :class="{ 'is-thinking': tailActivity.thinking }"
               >
                 <div :class="tailActivity.thinking ? 'contract-agent__thinking' : 'communication-step'" role="status">
-                  <img v-if="progressImages[tailActivity.type]" class="communication-progress-icon" :src="progressImages[tailActivity.type]" width="18" height="18" alt="" aria-hidden="true" />
+                  <img v-if="progressImages[tailActivity.type]" class="communication-progress-icon" :src="progressImages[tailActivity.type]" width="16" height="16" alt="" aria-hidden="true" />
                   <span>{{ tailActivity.text }}</span>
                 </div>
               </article>
@@ -1458,13 +1498,13 @@ onBeforeUnmount(() => {
 .communication-process-region__content {
   display: flex;
   flex-direction: column;
-  gap: 17px;
+  gap: var(--conversation-message-gap);
   min-height: 0;
   overflow: hidden;
 }
 .communication-process-region.is-collapsed {
   grid-template-rows: 0fr;
-  margin-bottom: -17px;
+  margin-bottom: calc(-1 * var(--conversation-message-gap));
   opacity: 0;
 }
 @media (prefers-reduced-motion: reduce) {
@@ -1480,7 +1520,8 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
 }
 .tail-activity-enter-active,
-.tail-activity-leave-active { transition: opacity 0.16s ease; }
+.tail-activity-leave-active { transition: opacity 0.22s ease; }
+.tail-activity-leave-active { position: absolute; left: 0; right: 0; pointer-events: none; }
 .tail-activity-enter-from,
 .tail-activity-leave-to { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {
@@ -1510,15 +1551,12 @@ onBeforeUnmount(() => {
 .turn-timing-enter-from,
 .turn-timing-leave-to {
   grid-template-rows: 0fr;
-  margin-bottom: -17px;
+  margin-bottom: calc(-1 * var(--conversation-message-gap));
   opacity: 0;
 }
 .communication-status:empty { display: none; }
-.communication-thinking.is-thinking {
-  margin-top: -9px;
-}
-.communication-step { margin-inline: 2px; display: flex; align-items: center; gap: 8px; }
-.communication-progress-icon { display: block; flex: 0 0 18px; object-fit: contain; }
+.communication-step { font-size: 12px; transition: color 0.3s ease; margin-inline: 2px; display: flex; align-items: center; gap: 6px; }
+.communication-progress-icon { transition: opacity 0.3s ease, filter 0.3s ease; display: block; flex: 0 0 16px; width: 16px; height: 16px; object-fit: contain; }
 .communication-step--settled { color: #9ca59f; font-weight: 400; }
 .communication-step--settled .communication-progress-icon { opacity: .55; filter: grayscale(1); }
 .communication-step.communication-step--settled > span { animation: none; }
@@ -2103,10 +2141,11 @@ onBeforeUnmount(() => {
 }
 
 .contract-agent__messages-content {
+  --conversation-message-gap: 14px;
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 17px;
+  gap: var(--conversation-message-gap);
   min-height: var(--message-pinned-height, 100%);
   box-sizing: border-box;
   padding: 24px 20px 16px;
@@ -2487,7 +2526,7 @@ button.contract-agent__sent-file-content:focus-visible { outline: 2px solid #719
   min-height: 24px;
   padding-inline: 2px;
   color: #95a098;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 24px;
 }
 
@@ -2874,6 +2913,18 @@ button.contract-agent__sent-file-content:focus-visible { outline: 2px solid #719
   to {
     opacity: 1;
   }
+}
+
+/* 状态项轻量浮现；思考先淡出，再让新状态进入同一位置。 */
+.contract-agent__message.is-progress-entry {
+  animation: communication-progress-appear 0.38s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.contract-agent__message.is-progress-entry.is-progress-after-thinking {
+  animation-delay: 0.2s;
+}
+@keyframes communication-progress-appear {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes contract-agent-message-enter {

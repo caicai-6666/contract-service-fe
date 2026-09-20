@@ -14,11 +14,19 @@ export function canInterruptTurn(turn) {
 }
 
 export function hasStartedFinal(turn) {
-  return Boolean(turn?.messages?.some((message) => message.message_kind === 'final'))
+  return Boolean(turn?.messages?.some((message) => message.message_kind === 'final' && (message.status !== 'interrupted' || TERMINAL_TURN_STATUSES.has(turn.status)) && typeof message.text === 'string' && message.text.trim()))
 }
 
-export function shouldCollapseTurnProcess(turn) {
-  return turn?.status === 'cancelled' || hasStartedFinal(turn)
+export function shouldCollapseTurnProcess(turn, displayStates) {
+  if (turn?.status === 'cancelled') return true
+  if (!hasStartedFinal(turn)) return false
+  if (!displayStates) return true
+  const stateFor = message => displayStates.get(`${turn.turn_id}:${message.message_id}`)
+  const finalVisible = turn.messages.some(message => message.message_kind === 'final'
+    && (message.status !== 'interrupted' || TERMINAL_TURN_STATUSES.has(turn.status)) && stateFor(message)?.visible)
+  const processCaughtUp = turn.messages.filter(message => message.message_kind === 'intermediate' && message.text?.trim())
+    .every(message => stateFor(message)?.text === message.text)
+  return finalVisible && processCaughtUp
 }
 
 export function copyableTurnMessage(turn, renderedText) {
@@ -114,16 +122,25 @@ export function settleTurnProgress(turn) {
   turn.active_progress = null
 }
 
+function sameProgress(left, right) {
+  return Boolean(left && right && left.type === right.type && left.message === right.message)
+}
+
 function setTurnProgress(turn, progress, id) {
-  if (turn.active_progress?.type !== progress?.type) settleTurnProgress(turn)
+  // final 开始后只继续消费事件和游标，不让迟到的过程通知重新激活界面。
+  if (hasStartedFinal(turn) || TERMINAL_TURN_STATUSES.has(turn.status)) {
+    settleTurnProgress(turn)
+    return
+  }
+  if (!sameProgress(turn.active_progress, progress)) settleTurnProgress(turn)
   turn.active_progress = progress
-  // 消息增量会结束高光，但不代表展示类型已切换；同类型穿插上报复用原阶段。
-  const samePhase = progress && turn.last_progress_type === progress.type
-  if (progress) turn.last_progress_type = progress.type
+  // 消息增量会结束高光；只有类型与完整说明都相同，穿插上报才复用原阶段。
+  const samePhase = sameProgress(turn.last_progress, progress)
+  if (progress) turn.last_progress = { type: progress.type, message: progress.message }
   if (!progress || progress.type === 'thinking') return
   turn.progress_entries ??= []
   const current = turn.progress_entries.find(entry => entry.active)
-    ?? (samePhase ? turn.progress_entries.at(-1) : null)
+    ?? (samePhase ? turn.progress_entries.findLast(entry => sameProgress(entry.progress, progress)) : null)
   if (current) {
     current.progress = { ...progress }
     current.active = true
@@ -138,7 +155,13 @@ export function turnDisplayMessages(turn) {
   const result = []
   const appendProgress = after => {
     for (const entry of turn.progress_entries ?? []) {
-      if (entry.after_message_id === after) result.push({
+      if (entry.after_message_id !== after) continue
+      const previous = result.at(-1)
+      // 思考阶段不留存；去掉它后相邻的完全相同状态合并展示，原事件和阶段仍保留。
+      if (sameProgress(previous?.progress, entry.progress)) {
+        previous.progress = entry.progress
+        previous.progressActive = entry.active
+      } else result.push({
         message_id: entry.id, message_kind: 'intermediate', text: '',
         status: 'completed', references: [], progress: entry.progress, progressActive: entry.active,
       })

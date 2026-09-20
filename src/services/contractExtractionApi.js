@@ -1,3 +1,5 @@
+import { modelCoreDefinitions } from '../models/coreDefinitions.js'
+import { notifyContractIngested } from './contractDataRevision.js'
 import {
   CONTRACT_API_BASE_PATH,
   ContractApiError,
@@ -84,46 +86,10 @@ export async function listExtractionRuns({ signal } = {}) {
 }
 
 export async function getCoreDefinitions({ signal } = {}) {
-  const response = await contractApiFetch(CORE_DEFINITIONS_PATH, { signal })
+  const response = await contractApiFetch(CORE_DEFINITIONS_PATH, { signal, cache: 'no-store' })
   const payload = await requireJsonResponse(response, [200])
-  const supportedTypes = new Set(['string', 'integer', 'number', 'boolean'])
-  const definitionCodes = new Set()
-  const isValid = Array.isArray(payload) && payload.every((definition) => {
-    if (
-      !definition
-      || typeof definition.code !== 'string'
-      || !definition.code
-      || definitionCodes.has(definition.code)
-      || typeof definition.name !== 'string'
-      || !['single', 'multiple'].includes(definition.cardinality)
-      || !Array.isArray(definition.properties)
-      || !definition.properties.length
-    ) return false
-
-    definitionCodes.add(definition.code)
-    const propertyCodes = new Set()
-    return definition.properties.every((property) => {
-      if (
-        !property
-        || typeof property.code !== 'string'
-        || !property.code
-        || propertyCodes.has(property.code)
-        || typeof property.name !== 'string'
-        || !supportedTypes.has(property.type)
-        || typeof property.required !== 'boolean'
-      ) return false
-      propertyCodes.add(property.code)
-      return true
-    })
-  })
-
-  if (!isValid) {
-    throw new ContractApiError('Core 审核表单定义格式无效', {
-      status: response.status,
-      payload,
-    })
-  }
-  return payload
+  try { return modelCoreDefinitions(payload) }
+  catch { throw new ContractApiError('Core 审核表单定义格式无效', { status: response.status, payload }) }
 }
 
 export async function getExtractionSnapshot(runId, { signal } = {}) {
@@ -168,7 +134,9 @@ export async function ingestExtractionRun(runId, draft, { signal } = {}) {
     body: JSON.stringify(draft),
     signal,
   })
-  return requireJsonResponse(response, [201])
+  const result = await requireJsonResponse(response, [201])
+  notifyContractIngested()
+  return result
 }
 
 export async function getDeduplicationCandidatePdf(fileUri, { signal } = {}) {
