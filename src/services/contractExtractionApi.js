@@ -1,5 +1,5 @@
 import { modelCoreDefinitions } from '../models/coreDefinitions.js'
-import { notifyContractIngested } from './contractDataRevision.js'
+import { modelSubmissionReceipt } from '../models/contractSubmission.js'
 import {
   CONTRACT_API_BASE_PATH,
   ContractApiError,
@@ -135,8 +135,7 @@ export async function ingestExtractionRun(runId, draft, { signal } = {}) {
     signal,
   })
   const result = await requireJsonResponse(response, [201])
-  notifyContractIngested()
-  return result
+  return modelSubmissionReceipt(result)
 }
 
 export async function getDeduplicationCandidatePdf(fileUri, { signal } = {}) {

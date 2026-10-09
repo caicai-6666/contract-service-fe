@@ -12,8 +12,8 @@ export function modelContractDocuments(payload) {
   return payload.map((item) => {
     if (!item || typeof item.document_id !== 'string' || !/^[a-f0-9]{64}$/.test(item.document_id)
       || ids.has(item.document_id)
-      || !['file_name', 'category', 'file_uri', 'reviewer', 'ingested_at'].every((key) => typeof item[key] === 'string')
-      || !item.file_name.trim() || !item.reviewer.trim()
+      || !['file_name', 'category', 'file_uri', 'uploader', 'ingested_at'].every((key) => typeof item[key] === 'string')
+      || !item.file_name.trim() || !item.uploader.trim()
       || !item.file_uri.startsWith('/') || item.file_uri.startsWith('//')
       || !isContractDate(item.contract_time)
       || !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/i.test(item.ingested_at)
@@ -28,7 +28,7 @@ export function modelContractDocuments(payload) {
       categoryTokens: [...new Set(item.category.split('/').map((code) => code.trim()).filter(Boolean))],
       date: item.contract_time,
       fileUri: item.file_uri,
-      reviewer: item.reviewer,
+      uploader: item.uploader,
       ingestedAt: item.ingested_at,
     }
   })
@@ -43,10 +43,10 @@ export function resolveDocumentCategories(document, categories) {
   }
 }
 
-export function filterContractDocuments(documents, { categoryCode = null, year = '', month = '', day = '', reviewer = null } = {}) {
+export function filterContractDocuments(documents, { categoryCode = null, year = '', month = '', day = '', uploader = null } = {}) {
   return documents.filter((document) => {
     if (categoryCode !== null && !document.categoryCodes.includes(categoryCode)) return false
-    if (reviewer !== null && document.reviewer !== reviewer) return false
+    if (uploader !== null && document.uploader !== uploader) return false
     if (!document.date) return !year
     return (!year || document.date.slice(0, 4) === String(year))
       && (!month || Number(document.date.slice(5, 7)) === Number(month))

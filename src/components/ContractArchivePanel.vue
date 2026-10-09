@@ -94,8 +94,8 @@ async function openPreview(document, { reload = false } = {}) {
     if (previewController === controller) previewLoading.value = false
   }
 }
-const currentReviewerName = getAuthSession()?.userName ?? ''
-const reviewerScope = ref('all')
+const currentUploaderName = getAuthSession()?.userName ?? ''
+const uploaderScope = ref('all')
 const documentModels = ref([])
 const documentsLoading = ref(true)
 const documentsLoaded = ref(false)
@@ -133,7 +133,7 @@ const filteredContracts = computed(() => filterContractDocuments(contracts.value
   year: selectedYear.value,
   month: selectedMonth.value,
   day: selectedDay.value,
-  reviewer: reviewerScope.value === 'mine' ? currentReviewerName : null,
+  uploader: uploaderScope.value === 'mine' ? currentUploaderName : null,
 }).sort((left, right) => (right.date ?? '').localeCompare(left.date ?? '')))
 const contractGroups = computed(() => {
   const groups = new Map()
@@ -422,14 +422,14 @@ watch([documentsLoading, documentsError], () => {
       <div class="contract-archive__time">
         <span class="contract-archive__time-label">签订时间</span>
         <ContractArchiveDateFilter :value="dateFilter" :years="years.map(Number)" @change="updateDateFilter" />
-        <div class="contract-archive__reviewer-scope" role="radiogroup" aria-label="按入库审核员筛选">
+        <div class="contract-archive__uploader-scope" role="radiogroup" aria-label="按上传人筛选">
           <label>
-            <input v-model="reviewerScope" type="radio" name="archive-reviewer-scope" value="all" />
+            <input v-model="uploaderScope" type="radio" name="archive-uploader-scope" value="all" />
             <span>全部</span>
           </label>
           <label>
-            <input v-model="reviewerScope" type="radio" name="archive-reviewer-scope" value="mine" />
-            <span>我审核入库</span>
+            <input v-model="uploaderScope" type="radio" name="archive-uploader-scope" value="mine" />
+            <span>我入库的</span>
           </label>
         </div>
       </div>
@@ -457,7 +457,7 @@ watch([documentsLoading, documentsError], () => {
               <h4>{{ contract.name }}</h4>
               <p class="contract-archive__identity">
                 <span class="contract-archive__category-tag">{{ contract.type }}</span>
-                <span class="contract-archive__reviewer"><span>审核人</span>{{ contract.reviewer || '—' }}</span>
+                <span class="contract-archive__uploader"><span>上传人</span>{{ contract.uploader || '—' }}</span>
               </p>
             </div>
             <dl class="contract-archive__metadata">
@@ -771,14 +771,14 @@ watch([documentsLoading, documentsError], () => {
   flex: 0 0 340px;
 }
 /* From Uiverse.io by abdo_6865；两段式紧凑尺寸，保留原版选中配色。 */
-.contract-archive__reviewer-scope {
+.contract-archive__uploader-scope {
   display: flex;
   flex: none;
   margin-left: auto;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.12);
   border-radius: 20px;
 }
-.contract-archive__reviewer-scope label {
+.contract-archive__uploader-scope label {
   position: relative;
   padding: 10px 14px;
   cursor: pointer;
@@ -788,11 +788,11 @@ watch([documentsLoading, documentsError], () => {
   font-size: 13px;
   color: #1a1a1a;
 }
-.contract-archive__reviewer-scope input {
+.contract-archive__uploader-scope input {
   position: absolute;
   opacity: 0;
 }
-.contract-archive__reviewer-scope label:first-child:has(input:checked) {
+.contract-archive__uploader-scope label:first-child:has(input:checked) {
   box-shadow:
     0 0 5px rgba(26, 123, 208, 0.2) inset,
     0 4px 12px rgba(0, 47, 255, 0.18),
@@ -800,13 +800,13 @@ watch([documentsLoading, documentsError], () => {
   background: linear-gradient(150deg, #ffffff, #c4dcfa);
   color: #1a7bd0;
 }
-.contract-archive__reviewer-scope label:first-child:hover {
+.contract-archive__uploader-scope label:first-child:hover {
   box-shadow:
     0 0 8px rgba(26, 123, 208, 0.25) inset,
     0 5px 14px rgba(0, 47, 255, 0.22),
     0 1px 0 rgba(255, 255, 255, 0.9) inset;
 }
-.contract-archive__reviewer-scope label:last-child:has(input:checked) {
+.contract-archive__uploader-scope label:last-child:has(input:checked) {
   box-shadow:
     0 0 5px rgba(155, 89, 182, 0.2) inset,
     0 4px 12px rgba(155, 89, 182, 0.18),
@@ -814,19 +814,19 @@ watch([documentsLoading, documentsError], () => {
   background: linear-gradient(150deg, #fdf9ff, #edc9e4);
   color: #8e44ad;
 }
-.contract-archive__reviewer-scope label:last-child:hover {
+.contract-archive__uploader-scope label:last-child:hover {
   box-shadow:
     0 0 8px rgba(155, 89, 182, 0.25) inset,
     0 5px 14px rgba(142, 68, 173, 0.22),
     0 1px 0 rgba(255, 255, 255, 0.9) inset;
 }
-.contract-archive__reviewer-scope label:first-child {
+.contract-archive__uploader-scope label:first-child {
   border-radius: 20px 0 0 20px;
 }
-.contract-archive__reviewer-scope label:last-child {
+.contract-archive__uploader-scope label:last-child {
   border-radius: 0 20px 20px 0;
 }
-.contract-archive__reviewer-scope label:has(input:focus-visible) {
+.contract-archive__uploader-scope label:has(input:focus-visible) {
   outline: 2px solid #7867ab;
   outline-offset: 3px;
 }
@@ -1000,12 +1000,12 @@ watch([documentsLoading, documentsError], () => {
   border-radius: 5px;
   box-shadow: inset 0 0 0 1px rgba(106, 140, 115, .09);
 }
-.contract-archive__reviewer {
+.contract-archive__uploader {
   display: inline-flex;
   gap: 6px;
   min-width: 0;
 }
-.contract-archive__reviewer > span {
+.contract-archive__uploader > span {
   flex: none;
   color: #788a7e;
   font-size: 11px;
@@ -1056,7 +1056,7 @@ watch([documentsLoading, documentsError], () => {
   .contract-archive__refresh svg.is-spinning { animation: none; }
   .contract-archive { transition: none; }
   .contract-archive__item { transition: none; }
-  .contract-archive__reviewer-scope label { transition: none; }
+  .contract-archive__uploader-scope label { transition: none; }
   .contract-archive__folder,
   .contract-archive__folder::before,
   .contract-archive__folder-paper,

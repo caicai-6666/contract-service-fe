@@ -18,6 +18,7 @@ import ContractDateWheel from './ContractDateWheel.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
 import BatchExtractionDialog from './BatchExtractionDialog.vue'
+import ReviewLogDialog from './ReviewLogDialog.vue'
 import { serializeCoreProperty, validateCoreProperty } from '../models/coreDefinitions.js'
 import { deduplicationInteraction } from '../models/deduplicationReview.js'
 import { awaitsExtractionFollowup } from '../models/extractionEventLifecycle.js'
@@ -44,6 +45,7 @@ defineOptions({ name: 'ContractIngestionView' })
 const props = defineProps({ active: { type: Boolean, default: true } })
 const emit = defineEmits(['visual-pause-change'])
 const batchExtractionOpen = ref(false)
+const reviewLogOpen = ref(false)
 
 const stageOrder = ['detection', 'duplication', 'preprocessing', 'classification', 'overview', 'field', 'clause', 'retrieval']
 const PDF_COVER_MAX_RASTER_SIDE = 1600
@@ -316,6 +318,8 @@ const removingClauseIds = reactive(new Set())
 const clausesLocallyModified = ref(false)
 const reviewFileName = ref('')
 const reviewFileNameModified = ref(false)
+const reviewNote = ref('')
+const ingestionRetryDraft = ref(null)
 const reviewSummary = ref('')
 const reviewSummaryModified = ref(false)
 const ingestionPending = ref(false)
@@ -323,6 +327,7 @@ const ingestionErrors = ref([])
 const ingestionIssues = ref([])
 const activeIngestionIssueTarget = ref('')
 const ingestionReceipt = ref(null)
+const ingestionFormLocked = computed(() => ingestionPending.value || Boolean(ingestionRetryDraft.value) || currentRunStatus.value === 'submitted')
 const clauseInsertIndex = ref(null)
 const clauseInsertError = ref('')
 const clauseFormAnimating = ref(false)
@@ -407,7 +412,7 @@ const selectedFilePageCountLabel = computed(() => {
 const canCancelExtractionRun = computed(() => Boolean(
   currentRunId.value
   && workflowStarted.value
-  && !['cancelled', 'expired', 'unavailable', 'ingested'].includes(currentRunStatus.value),
+  && !['cancelled', 'expired', 'unavailable', 'submitted'].includes(currentRunStatus.value),
 ))
 const filePreparationLabel = computed(() => {
   if (selectedSourceKind.value === 'image' && imageConversionStatus.value === 'converting') {
@@ -417,7 +422,7 @@ const filePreparationLabel = computed(() => {
   if (cancellationPending.value) return '正在取消并释放任务资源'
   if (coreDefinitionsLoading.value) return '正在准备 Core 审核表单'
   if (uploadInProgress.value) return '正在上传并校验 PDF'
-  if (currentRunStatus.value === 'ingested') return '任务结束'
+  if (currentRunStatus.value === 'submitted') return '任务结束'
   if (currentRunStatus.value === 'not_a_contract') return '未识别为合同文档'
   if (currentRunStatus.value === 'duplicate_rejected') return '发现重复合同，处理已终止'
   if (currentRunStatus.value === 'awaiting_deduplication_review') return '等待查重审核'
@@ -435,7 +440,7 @@ const extractionControlLabel = computed(() => {
   if (cancellationPending.value) return '正在取消任务'
   if (coreDefinitionsLoading.value) return '正在准备表单'
   if (uploadInProgress.value) return '正在创建任务'
-  if (currentRunStatus.value === 'ingested') return '任务结束'
+  if (currentRunStatus.value === 'submitted') return '任务结束'
   if (canCancelExtractionRun.value) return '取消任务'
   if (workflowRewinding.value) return '正在回退'
   if (workflowStopped.value) return '重新提取'
@@ -446,7 +451,7 @@ const extractionSecondaryLabel = computed(() => {
   if (cancellationPending.value) return '正在释放任务资源'
   if (coreDefinitionsLoading.value) return '正在加载 Core 定义'
   if (uploadInProgress.value) return '正在上传并校验'
-  if (currentRunStatus.value === 'ingested') return '合同已正式入库'
+  if (currentRunStatus.value === 'submitted') return '合同已提交审核'
   if (canCancelExtractionRun.value) return workflowRunning.value
     ? '处理中，点击取消'
     : '点击取消并释放任务'
@@ -459,7 +464,7 @@ const extractionControlVisible = computed(() => (
   Boolean(selectedFile.value && coverPresentationReady.value)
   || canCancelExtractionRun.value
   || cancellationPending.value
-  || currentRunStatus.value === 'ingested'
+  || currentRunStatus.value === 'submitted'
   || (isRestoredRun.value && workflowRewinding.value)
 ))
 const extractionControlDisabled = computed(() => {
@@ -508,12 +513,13 @@ const canIngestResult = computed(() => (
   && Boolean(currentRunId.value)
   && !ingestionPending.value
   && !ingestionReceipt.value
+  && (currentRunStatus.value !== 'submitted' || Boolean(ingestionRetryDraft.value))
 ))
 const ingestionActionCharacters = computed(() => Array.from(
   ingestionPending.value
-    ? '正在正式入库'
+    ? '正在提交审核'
     : resultComplete.value
-      ? '正式入库'
+      ? (ingestionRetryDraft.value ? '重试获取送审回执' : '提交审核')
       : '等待全部阶段完成',
 ))
 const unresolvedIngestionIssueCount = computed(() => (
@@ -530,7 +536,7 @@ const deduplicationCandidates = computed(() => {
   if (!Array.isArray(candidates)) return []
   return candidates.map((candidate) => ({
     ...candidate,
-    reviewer: typeof candidate?.reviewer === 'string' ? candidate.reviewer.trim() : '',
+    uploader: typeof candidate?.uploader === 'string' ? candidate.uploader.trim() : '',
   }))
 })
 const draftClauses = computed(() => clauseReviewModel.value)
@@ -1200,7 +1206,7 @@ function applyExtractionSnapshot(snapshot, {
   openDocumentRejection = true,
 } = {}) {
   const run = snapshot?.run
-  if (!run?.run_id) return
+  if (!run?.run_id || (currentRunStatus.value === 'submitted' && currentRunId.value === run.run_id)) return
   awaitingExtractionFollowup = false
 
   currentRunId.value = run.run_id
@@ -1284,7 +1290,11 @@ function scheduleStreamRecovery(generation, message = '') {
 async function handleExtractionEvent(frame, generation) {
   if (generation !== streamGeneration || frame.event === 'heartbeat') return
   const event = frame.data
-  if (!event || typeof event !== 'object') return
+  if (!event || typeof event !== 'object' || currentRunStatus.value === 'submitted') return
+  if (event.event_type === 'run.submitted') {
+    finalizeSubmittedWorkflow(event.run_id || currentRunId.value)
+    return
+  }
   awaitingExtractionFollowup = awaitsExtractionFollowup(event)
 
   const sequence = Number(frame.id || event.sequence)
@@ -1437,6 +1447,8 @@ function resetWorkflowState({ preserveDetail = false } = {}) {
   clauseFormAnimating.value = false
   reviewFileName.value = ''
   reviewFileNameModified.value = false
+  reviewNote.value = ''
+  ingestionRetryDraft.value = null
   reviewSummary.value = ''
   reviewSummaryModified.value = false
   ingestionPending.value = false
@@ -1644,6 +1656,8 @@ function finalizeCancelledWorkflow(runId) {
   clauseFormAnimating.value = false
   reviewFileName.value = ''
   reviewFileNameModified.value = false
+  reviewNote.value = ''
+  ingestionRetryDraft.value = null
   reviewSummary.value = ''
   reviewSummaryModified.value = false
   ingestionPending.value = false
@@ -2489,24 +2503,27 @@ function validateIngestionDraft(core, clauses) {
   const issues = []
   const fileName = stripPdfSuffix(reviewFileName.value.trim()).trim()
   if (!fileName) issues.push(ingestionIssue('file-name:required', '请填写最终展示文件名', 'file-name'))
-  if ([...fileName].length > 255) {
-    issues.push(ingestionIssue('file-name:max-length', '最终展示文件名不能超过 255 个字符', 'file-name'))
+  if ([...fileName].length > 200) {
+    issues.push(ingestionIssue('file-name:max-length', '最终展示文件名不能超过 200 个字符', 'file-name'))
   }
   const summary = reviewSummary.value.trim()
   if (!summary) issues.push(ingestionIssue('summary:required', '请填写合同摘要', 'summary'))
   if ([...summary].length > 3000) {
     issues.push(ingestionIssue('summary:max-length', '合同摘要不能超过 3000 个字符', 'summary'))
   }
+  if (typeof reviewNote.value !== 'string' || [...reviewNote.value].length > 10000) {
+    issues.push(ingestionIssue('note:max-length', '入库员备注必须为文字且不能超过 10000 个字符', 'note'))
+  }
   for (const definition of coreDefinitions.value) {
     const value = core[definition.code]
     const items = definition.cardinality === 'multiple'
       ? (Array.isArray(value) ? value : [])
       : value === null ? [] : [definition.properties.length === 1 ? { [definition.properties[0].code]: value } : value]
-    // 签订日期是入库必填项，整个 Core 对象为空时也不能跳过校验。
+    // 签订日期是送审必填项，整个 Core 对象为空时也不能跳过校验。
     if (!items.length) {
       definition.properties.filter(isSigningDateProperty).forEach((property) => {
         const target = coreReviewPath(definition.code, 0, property.code)
-        issues.push(ingestionIssue(`${target}:required`, '正式入库前请填写签订日期', target))
+        issues.push(ingestionIssue(`${target}:required`, '提交审核前请填写签订日期', target))
       })
     }
     for (const [itemIndex, item] of items.entries()) {
@@ -2522,7 +2539,7 @@ function validateIngestionDraft(core, clauses) {
         const target = coreReviewPath(definition.code, itemIndex, property.code)
         issues.push(ingestionIssue(
           `${target}:required`,
-          isSigningDateProperty(property) ? '正式入库前请填写签订日期' : `请填写“${definition.name}”中的必填项“${property.name}”`,
+          isSigningDateProperty(property) ? '提交审核前请填写签订日期' : `请填写“${definition.name}”中的必填项“${property.name}”`,
           target,
         ))
       })
@@ -2562,6 +2579,7 @@ function ingestionTargetFromLocation(location) {
   const fields = Array.isArray(location) ? location.filter((item) => item !== 'body') : []
   if (fields[0] === 'file_name') return 'file-name'
   if (fields[0] === 'summary') return 'summary'
+  if (fields[0] === 'note') return 'note'
   if (fields[0] === 'core') {
     const definition = coreDefinitions.value.find((item) => item.code === fields[1])
     if (!definition) return 'core'
@@ -2580,6 +2598,7 @@ function ingestionTargetFromLocation(location) {
 function ingestionTargetFingerprint(target) {
   if (target === 'file-name') return reviewFileName.value
   if (target === 'summary') return reviewSummary.value
+  if (target === 'note') return reviewNote.value
   if (target === 'clauses') return String(draftClauses.value.length)
   if (target.startsWith('core:')) {
     const [, definitionCode, rawItemIndex, propertyCode] = target.split(':')
@@ -2602,6 +2621,7 @@ function ingestionFieldLabel(location) {
   if (!fields.length) return '提交内容'
   if (fields[0] === 'file_name') return '最终展示文件名'
   if (fields[0] === 'summary') return '合同摘要'
+  if (fields[0] === 'note') return '入库员备注'
   if (fields[0] === 'core') {
     const definition = coreDefinitions.value.find((item) => item.code === fields[1])
     const propertyCode = fields.find((item) => typeof item === 'string' && definition?.properties.some((property) => property.code === item))
@@ -2642,7 +2662,7 @@ function localizedIngestionDetail(detail) {
   if (normalizedMessage && !/[A-Za-z_]{3,}/.test(normalizedMessage)) {
     return `${label}：${normalizedMessage}`
   }
-  return `${label}格式不符合入库要求，请检查后重试`
+  return `${label}格式不符合送审要求，请检查后重试`
 }
 
 function ingestionFailureMessages(error) {
@@ -2661,19 +2681,20 @@ function ingestionFailureMessages(error) {
         detail?.type === 'missing' || detail?.type === 'string_too_short'
       ))
       if (missingDetail) return localizedIngestionDetail(missingDetail)
-      return `${label}的值或数据类型不符合入库要求，请检查后重试`
+      return `${label}的值或数据类型不符合送审要求，请检查后重试`
     }).filter(Boolean)
     if (messages.length) return messages
   }
   const genericMessages = {
-    404: '处理任务不存在、已经过期、已经入库，或当前用户无权操作',
-    409: '仍有业务阶段或入库所需结果尚未成功，请等待处理完成或重试失败阶段',
-    422: '最终文件名、Core 或条款不符合入库要求，请检查表单内容',
-    502: '处理版 PDF 或合同索引写入失败，审核内容已保留，可以重新入库',
+    404: '处理任务不存在或已过期且无本人的待审申请，或当前用户无权操作',
+    409: '处理结果尚未就绪、判重未通过，或该任务已用不同内容提交审核',
+    422: '名称、摘要、备注、Core 或条款不符合送审要求，请检查表单内容',
+    502: '送审服务暂时失败，本次提交内容已保留，请使用相同内容重试',
   }
+  if (typeof details === 'string' && details.trim()) return [details.trim()]
   const fallbackMessage = typeof error?.message === 'string' && !/[A-Za-z_]{3,}/.test(error.message)
     ? error.message
-    : '网络请求异常，请检查连接后重新入库'
+    : '提交结果尚未确认，请检查连接后使用相同内容重试，不要新建任务重复送审'
   return [genericMessages[error?.status] || fallbackMessage]
 }
 
@@ -2686,7 +2707,7 @@ function ingestionFailureIssues(error) {
     const isClauseParentError = message.includes('父条款必须先于当前条款出现')
     return [ingestionIssue(
       'backend:result:validation',
-      message || '入库校验未通过，服务端未返回具体原因，请稍后重试',
+      message || '送审校验未通过，服务端未返回具体原因，请稍后重试',
       'result',
       isClauseParentError ? {
         suggestion: '条款层级关系可能存在提取偏差，建议通过“新建提取”重新上传原文件并执行提取流程。',
@@ -2709,7 +2730,7 @@ function ingestionFailureIssues(error) {
     const preferredDetail = missingDetail || targetDetails[0]
     const message = missingDetail || targetDetails.length === 1
       ? localizedIngestionDetail(preferredDetail)
-      : `${ingestionFieldLabel(preferredDetail?.loc)}的值或数据类型不符合入库要求，请检查后重试`
+      : `${ingestionFieldLabel(preferredDetail?.loc)}的值或数据类型不符合送审要求，请检查后重试`
     const locationKey = Array.isArray(preferredDetail?.loc) ? preferredDetail.loc.join('.') : target
     return ingestionIssue(
       `backend:${locationKey}:${preferredDetail?.type || 'validation'}`,
@@ -2832,38 +2853,65 @@ function handleIngestionIssueFocusout(event) {
   if (targets.size) nextTick(() => refreshIngestionIssues(targets))
 }
 
+function finalizeSubmittedWorkflow(runId, receipt = null) {
+  if (currentRunId.value !== runId) return
+  if (receipt) ingestionReceipt.value = receipt
+  currentRunStatus.value = 'submitted'
+  workflowRunning.value = false
+  uploadInProgress.value = false
+  workflowError.value = ''
+  awaitingExtractionFollowup = false
+  // 送审后运行及临时 PDF 已释放；丢弃在途快照，但保留提交请求以取得回执。
+  streamGeneration += 1
+  eventStreamController?.abort()
+  if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
+  reconnectTimer = null
+  if (restoredCoverController) {
+    fileSelectionSequence += 1
+    coverReading.value = false
+    restoredCoverController.abort()
+    restoredCoverController = null
+  }
+  extractionRuns.value = extractionRuns.value.filter(run => run.run_id !== runId)
+  clearIngestionErrors()
+  clearIngestionIssues()
+}
+
 async function submitIngestion() {
   if (!canIngestResult.value) return
-  reviewFileName.value = stripPdfSuffix(reviewFileName.value.trim()).trim()
-  const core = serializeCoreReview()
-  const clauses = serializeClauseReview()
-  const validationIssues = validateIngestionDraft(core, clauses)
-  if (validationIssues.length) {
-    showIngestionIssues(validationIssues)
-    return
-  }
-
   const runId = currentRunId.value
+  if (!ingestionRetryDraft.value) {
+    reviewFileName.value = stripPdfSuffix(reviewFileName.value.trim()).trim()
+    const core = serializeCoreReview()
+    const clauses = serializeClauseReview()
+    const validationIssues = validateIngestionDraft(core, clauses)
+    if (validationIssues.length) {
+      showIngestionIssues(validationIssues)
+      return
+    }
+    // 响应丢失时使用本次不可变内容恢复回执，不能改内容后重试同一任务。
+    ingestionRetryDraft.value = JSON.parse(JSON.stringify({
+      file_name: reviewFileName.value.trim(), summary: reviewSummary.value.trim(),
+      note: reviewNote.value, core, clauses,
+    }))
+  }
   const controller = new AbortController()
   ingestionRequestController = controller
   ingestionPending.value = true
   clearIngestionErrors()
   try {
-    const receipt = await ingestExtractionRun(runId, {
-      file_name: reviewFileName.value.trim(),
-      summary: reviewSummary.value.trim(),
-      core,
-      clauses,
-    }, { signal: controller.signal })
+    const receipt = await ingestExtractionRun(runId, ingestionRetryDraft.value, { signal: controller.signal })
     if (ingestionRequestController !== controller || currentRunId.value !== runId) return
-    ingestionReceipt.value = receipt
-    currentRunStatus.value = 'ingested'
-    workflowRunning.value = false
-    extractionRuns.value = extractionRuns.value.filter((run) => run.run_id !== runId)
-    eventStreamController?.abort()
-    clearIngestionIssues()
+    finalizeSubmittedWorkflow(runId, receipt)
+    ingestionRetryDraft.value = null
   } catch (error) {
+    if (ingestionRequestController !== controller || currentRunId.value !== runId) return
     if (error?.name !== 'AbortError') {
+      if (currentRunStatus.value === 'submitted') {
+        showIngestionErrors(['合同已提交审核，回执尚未取得；可使用相同内容重试获取回执。'])
+        return
+      }
+      if ([400, 401, 403, 404, 409, 422].includes(error?.status)) ingestionRetryDraft.value = null
       const validationIssues = ingestionFailureIssues(error)
       if (validationIssues.length) showIngestionIssues(validationIssues)
       else showIngestionErrors(ingestionFailureMessages(error))
@@ -3367,6 +3415,12 @@ onBeforeUnmount(() => {
         <button type="button" class="contract-new-trigger" @click="batchExtractionOpen = true">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h12v14H8zM4 7v14h12M11 8h6M11 12h6" /></svg>
           <span>批量提取</span>
+        </button>
+      </div>
+      <div class="contract-action-pedestal">
+        <button type="button" class="contract-new-trigger" @click="reviewLogOpen = true">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14V8l-5-5ZM14 3v5h5M8 12h8M8 16h5" /></svg>
+          <span>审核日志</span>
         </button>
       </div>
     </div>
@@ -3967,12 +4021,12 @@ onBeforeUnmount(() => {
         <aside
           v-if="detailMode === 'result' && ingestionIssues.length"
           class="ingestion-validation-panel"
-          aria-label="入库校验问题"
+          aria-label="送审校验问题"
           aria-live="polite"
         >
           <header>
             <div>
-              <span>入库检查</span>
+              <span>送审检查</span>
               <strong>{{ unresolvedIngestionIssueCount ? `${unresolvedIngestionIssueCount} 项待处理` : '全部已解决' }}</strong>
             </div>
             <small>{{ ingestionIssues.length }} 项</small>
@@ -4101,13 +4155,13 @@ onBeforeUnmount(() => {
                   <h4 :title="candidate.file_name || '未命名候选合同'">
                     {{ candidate.file_name || '未命名候选合同' }}
                   </h4>
-                  <div v-if="candidate.reviewer" class="deduplication-candidate__reviewer">
+                  <div v-if="candidate.uploader" class="deduplication-candidate__uploader">
                     <svg viewBox="0 0 20 20" aria-hidden="true">
                       <circle cx="10" cy="7" r="3" />
                       <path d="M4.5 16c.45-3.05 2.3-4.6 5.5-4.6s5.05 1.55 5.5 4.6" />
                     </svg>
-                    <span>审核人</span>
-                    <strong :title="candidate.reviewer">{{ candidate.reviewer }}</strong>
+                    <span>上传人</span>
+                    <strong :title="candidate.uploader">{{ candidate.uploader }}</strong>
                   </div>
                 </div>
                 <strong class="deduplication-candidate__relation">
@@ -4316,6 +4370,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="extraction-result-editor" @focusout="handleIngestionIssueFocusout">
+            <fieldset class="extraction-review-fields" :disabled="ingestionFormLocked">
             <section class="extraction-result-section extraction-result-section--file-name">
               <header><strong>合同名称</strong><span>最终展示名称</span></header>
               <label
@@ -4327,14 +4382,15 @@ onBeforeUnmount(() => {
                 <input
                   type="text"
                   :value="reviewFileName"
-                  :disabled="Boolean(ingestionReceipt)"
-                  placeholder="请输入最终展示文件名（无需扩展名）"
+                  :disabled="ingestionFormLocked"
+                  :aria-invalid="!reviewFileName.trim() || [...stripPdfSuffix(reviewFileName.trim()).trim()].length > 200"
+                  placeholder="请输入最终展示文件名（无需扩展名，最多 200 字符）"
                   @input="updateReviewFileName"
                 />
               </label>
             </section>
             <section class="extraction-result-section">
-              <header><strong>合同摘要</strong><span>最终入库摘要</span></header>
+              <header><strong>合同摘要</strong><span>最终送审摘要</span></header>
               <label
                 class="extraction-result-file-name extraction-result-summary"
                 :class="{ 'is-issue-focused': activeIngestionIssueTarget === 'summary' }"
@@ -4343,7 +4399,7 @@ onBeforeUnmount(() => {
                 <span>摘要内容<b>必填</b></span>
                 <textarea
                   :value="reviewSummary"
-                  :disabled="ingestionPending || Boolean(ingestionReceipt)"
+                  :disabled="ingestionFormLocked"
                   :aria-invalid="!reviewSummary.trim() || [...reviewSummary.trim()].length > 3000"
                   placeholder="请核对并填写最终合同摘要"
                   rows="6"
@@ -4351,6 +4407,16 @@ onBeforeUnmount(() => {
                   @input="updateReviewSummary($event.target.value)"
                 ></textarea>
                 <small :class="{ 'is-over-limit': [...reviewSummary.trim()].length > 3000 }">{{ [...reviewSummary.trim()].length }} / 3000</small>
+              </label>
+            </section>
+            <section class="extraction-result-section">
+              <header><strong>入库员备注</strong><span>仅用于审核沟通</span></header>
+              <label class="extraction-result-file-name extraction-result-summary"
+                :class="{ 'is-issue-focused': activeIngestionIssueTarget === 'note' }" data-ingestion-target="note">
+                <span>备注内容<small>可留空</small></span>
+                <textarea v-model="reviewNote" rows="3" :aria-invalid="[...reviewNote].length > 10000"
+                  placeholder="填写希望审核人员重点关注的事项"></textarea>
+                <small :class="{ 'is-over-limit': [...reviewNote].length > 10000 }">{{ [...reviewNote].length }} / 10000</small>
               </label>
             </section>
             <section v-if="coreReviewFields.length" class="extraction-result-section">
@@ -4377,7 +4443,7 @@ onBeforeUnmount(() => {
                     v-if="field.cardinality === 'single' && field.properties.length === 1"
                     class="extraction-result-item__title-meta"
                   >
-                    <b v-if="isSigningDateProperty(field.properties[0])">入库必填</b>
+                    <b v-if="isSigningDateProperty(field.properties[0])">送审必填</b>
                     <b v-else-if="field.properties[0].required">对象内必填</b>
                     <i
                       v-if="modifiedFields.has(coreReviewPath(field.code, 0, field.properties[0].code))"
@@ -4413,7 +4479,7 @@ onBeforeUnmount(() => {
                     :data-ingestion-target="coreReviewPath(field.code, itemIndex, property.code)"
                   >
                     <span v-if="field.cardinality === 'multiple' || field.properties.length > 1">
-                      {{ property.name }}<b v-if="isSigningDateProperty(property)">入库必填</b><b v-else-if="property.required">对象内必填</b>
+                      {{ property.name }}<b v-if="isSigningDateProperty(property)">送审必填</b><b v-else-if="property.required">对象内必填</b>
                       <i v-if="modifiedFields.has(coreReviewPath(field.code, itemIndex, property.code))">已修改</i>
                     </span>
                     <div
@@ -4430,7 +4496,7 @@ onBeforeUnmount(() => {
                         :aria-label="property.name"
                         :title="property.extraction_rule"
                         :aria-expanded="openBooleanControlKey === booleanReviewControlKey(field.code, itemIndex, property.code)"
-                        :disabled="Boolean(ingestionReceipt)"
+                        :disabled="ingestionFormLocked"
                         @click="toggleBooleanReviewControl(field.code, itemIndex, property.code)"
                       >
                         <span>{{ property.constraints.enum.find(option => option.value === coreReviewInputValue(field.code, itemIndex, property))?.label || (coreReviewValuePresent(coreReviewInputValue(field.code, itemIndex, property)) ? '原值无效，请重新选择' : '未填写') }}</span>
@@ -4445,7 +4511,7 @@ onBeforeUnmount(() => {
                               type="radio"
                               :value="option.value"
                               :checked="coreReviewInputValue(field.code, itemIndex, property) === option.value"
-                              :disabled="Boolean(ingestionReceipt)"
+                              :disabled="ingestionFormLocked"
                               :tabindex="openBooleanControlKey === booleanReviewControlKey(field.code, itemIndex, property.code) ? 0 : -1"
                               @change="selectEnumReviewValue(field, itemIndex, property, $event)"
                             />
@@ -4457,7 +4523,7 @@ onBeforeUnmount(() => {
                     <ContractDateWheel
                       v-else-if="isSigningDateProperty(property)"
                       :model-value="coreReviewInputValue(field.code, itemIndex, property)"
-                      :disabled="Boolean(ingestionReceipt)"
+                      :disabled="ingestionFormLocked"
                       :required="property.required && coreReviewItemActive(field.code, itemIndex)"
                       @update:model-value="updateSigningDateValue(field, itemIndex, property, $event)"
                     />
@@ -4720,15 +4786,19 @@ onBeforeUnmount(() => {
             <div v-if="!coreReviewFields.length && !draftClauses.length" class="ingestion-detail__notice">
               当前草稿已创建，但暂时没有可展示的提取分区。
             </div>
+            </fieldset>
+            <p v-if="ingestionRetryDraft && !ingestionPending" class="ingestion-detail__notice">
+              {{ currentRunStatus === 'submitted' ? '已提交审核，可重试获取回执。' : '提交结果尚未确认，已锁定本次内容，请使用原内容重试。' }}
+            </p>
             <button
               type="button"
               class="extraction-ingestion-button"
               :class="{
                 'is-submitting': ingestionPending,
-                'is-sent': Boolean(ingestionReceipt),
+                'is-sent': Boolean(ingestionReceipt) || (currentRunStatus === 'submitted' && !ingestionRetryDraft),
               }"
               :disabled="!canIngestResult"
-              :aria-label="ingestionReceipt ? '已正式入库' : ingestionActionCharacters.join('')"
+              :aria-label="currentRunStatus === 'submitted' && !ingestionRetryDraft ? '已提交审核' : ingestionActionCharacters.join('')"
               @click="submitIngestion"
             >
               <span class="extraction-ingestion-button__outline" aria-hidden="true"></span>
@@ -4755,7 +4825,7 @@ onBeforeUnmount(() => {
                   </svg>
                 </span>
                 <span class="extraction-ingestion-button__label">
-                  <i v-for="(character, index) in Array.from('已正式入库')" :key="index" :style="{ '--i': index }">
+                  <i v-for="(character, index) in Array.from('已提交审核')" :key="index" :style="{ '--i': index }">
                     {{ character }}
                   </i>
                 </span>
@@ -4770,7 +4840,7 @@ onBeforeUnmount(() => {
             class="ingestion-detail__error ingestion-error-toast"
             role="alert"
           >
-            <strong>暂时无法入库</strong>
+            <strong>提交未完成</strong>
             <ol>
               <li v-for="(error, index) in ingestionErrors" :key="`${index}-${error}`">
                 {{ error }}
@@ -4790,6 +4860,7 @@ onBeforeUnmount(() => {
       </div>
     </Transition>
 
+    <ReviewLogDialog :open="active && reviewLogOpen" @close="reviewLogOpen = false" />
     <BatchExtractionDialog :open="active && batchExtractionOpen" @close="batchExtractionOpen = false" @created="refreshExtractionRuns({ showLoader: false })" @tasks="runsPanelOpen || toggleRunsPanel()" />
 
     <PdfPreviewOverlay
@@ -8378,7 +8449,7 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.deduplication-candidate__reviewer {
+.deduplication-candidate__uploader {
   display: inline-grid;
   grid-template-columns: 18px auto minmax(0, 1fr);
   gap: 6px;
@@ -8389,7 +8460,7 @@ onBeforeUnmount(() => {
   font-size: 9px;
 }
 
-.deduplication-candidate__reviewer svg {
+.deduplication-candidate__uploader svg {
   width: 18px;
   height: 18px;
   padding: 3px;
@@ -8403,11 +8474,11 @@ onBeforeUnmount(() => {
   border-radius: 50%;
 }
 
-.deduplication-candidate__reviewer > span {
+.deduplication-candidate__uploader > span {
   white-space: nowrap;
 }
 
-.deduplication-candidate__reviewer > strong {
+.deduplication-candidate__uploader > strong {
   min-width: 0;
   overflow: hidden;
   color: #4e5a54;
@@ -8617,6 +8688,8 @@ onBeforeUnmount(() => {
   stroke-linejoin: round;
   stroke-width: 1.8;
 }
+
+.extraction-review-fields { display: contents; }
 
 .extraction-result-editor {
   display: grid;

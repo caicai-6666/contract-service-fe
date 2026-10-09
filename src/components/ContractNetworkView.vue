@@ -286,7 +286,7 @@ onBeforeUnmount(() => { disposed = true; relationCache.clear(); summaryCache.cle
               <dl class="network-metadata">
                 <div><dt>合同摘要</dt><dd><ContractSummaryDetail :document-id="inspectedContract.document_id" :active="active" :source="loadCachedSummary" :revision="summaryRevision" /></dd></div>
                 <div><dt>合同类别</dt><dd>{{ inspectedContract.category || '—' }}</dd></div>
-                <div><dt>审核人</dt><dd>{{ inspectedContract.reviewer || '—' }}</dd></div>
+                <div><dt>上传人</dt><dd>{{ inspectedContract.uploader || '—' }}</dd></div>
                 <div><dt>签署日期</dt><dd>{{ inspectedContract.date || '—' }}</dd></div>
                 <div><dt>入库时间（北京时间）</dt><dd>{{ formatBeijingTime(inspectedContract.ingestedAt) }}</dd></div>
               </dl>
@@ -395,7 +395,7 @@ onBeforeUnmount(() => { disposed = true; relationCache.clear(); summaryCache.cle
 .network-canvas { position: absolute; inset: 0; opacity: 0; transition: opacity .7s; cursor: grab; }.network-canvas.is-ready { opacity: 1; }.network-canvas.is-idle { opacity: .7; cursor: default; }
 .network-detail { position: absolute; z-index: 4; bottom: 60px; left: 24px; max-width: min(330px, calc(100% - 120px)); padding: 14px 16px; border: 1px solid #dbe6dd; border-radius: 12px; background: #fffffff0; box-shadow: 0 10px 30px #365e5010; pointer-events: none; backdrop-filter: blur(12px); }.network-detail strong { font-size: 13px; font-weight: 500; }
 .network-detail-enter-active, .network-detail-leave-active { transition: opacity .18s, transform .18s; }.network-detail-enter-from, .network-detail-leave-to { opacity: 0; transform: translateY(5px); }
-.network-loading { position: absolute; z-index: 6; left: 50%; top: 28px; transform: translateX(-50%); background: #ffffffed; padding: 10px; border-radius: 50%; }.network-loading i { display: block; width: 17px; height: 17px; border: 1.5px solid #d5e3d9; border-top-color: #60806a; border-radius: 50%; animation: network-spin .8s linear infinite; }
+.network-loading { position: absolute; z-index: 6; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #ffffffed; padding: 10px; border-radius: 50%; }.network-loading i { display: block; width: 17px; height: 17px; border: 1.5px solid #d5e3d9; border-top-color: #60806a; border-radius: 50%; animation: network-spin .8s linear infinite; }
 .network-error, .network-empty { position: absolute; bottom: 55px; left: 50%; transform: translateX(-50%); color: #819788; font-size: 12px; text-align: center; }.network-error { color: #a36353; z-index: 6; }.network-error button { margin-left: 8px; cursor: pointer; }
 .network-tools { position: absolute; bottom: 30px; right: 24px; display: flex; flex-direction: column; padding: 5px; border-radius: 12px; border: 1px solid #dce7df; background: #ffffffd9; backdrop-filter: blur(12px); }.network-tools button { width: 31px; height: 31px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: #6e8979; font-size: 19px; cursor: pointer; }.network-tools button:hover { background: #edf3ee; }.network-tools > span { height: 1px; margin: 4px; background: #e3ebe5; }
 .contract-network button:focus-visible { outline: 2px solid #789e88; outline-offset: 2px; }
