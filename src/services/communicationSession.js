@@ -125,16 +125,15 @@ export function createCommunicationSession() {
     streams.get(turn.turn_id)?.abort()
     const controller = new AbortController()
     streams.set(turn.turn_id, controller)
-    let failures = 0
+    let retryDelay = 1000
     try {
-      while (!disposed && !controller.signal.aborted) {
+      while (!disposed && !controller.signal.aborted && !conversation.removed && !TERMINAL_TURN_STATUSES.has(turn.status)) {
         try {
           turn.connection = recover ? 'recovering' : 'connecting'
           if (recover) await snapshot(conversation, turn, controller.signal)
           if (TERMINAL_TURN_STATUSES.has(turn.status)) { turn.connection = ''; break }
           recover = false
           turn.connectionError = ''
-          let replayNeeded = false
           await streamCommunicationEvents(conversation.id, turn.turn_id, {
             signal: controller.signal, lastEventId: turn.last_sequence,
             onOpen() {
@@ -142,36 +141,32 @@ export function createCommunicationSession() {
             },
             onEvent(frame) {
               if (controller.signal.aborted || disposed) return false
+              const previousSequence = turn.last_sequence
               const outcome = applyTurnEvent(turn, frame)
-              if (outcome === 'recover') { replayNeeded = true; return false }
-              if (outcome === 'unavailable') {
-                turn.connectionError = frame.data.message || '轮次事件已不可用，请恢复快照'
-                turn.connection = 'disconnected'
-                return false
-              }
+              // 连接级错误先恢复快照，由快照确认轮次是否仍可继续。
+              if (outcome === 'recover' || outcome === 'unavailable') return false
+              if (turn.last_sequence !== previousSequence) retryDelay = 1000
               turn.connection = 'connected'
               sync(conversation, frame.event === 'turn.status')
               return !TERMINAL_TURN_STATUSES.has(turn.status)
             },
           })
           if (TERMINAL_TURN_STATUSES.has(turn.status)) { turn.connection = ''; break }
-          if (turn.connection === 'disconnected') break
-          recover = replayNeeded
           throw new Error('对话连接已断开，正在恢复')
         } catch (error) {
           if (controller.signal.aborted || disposed) break
-          if ([401, 404, 422].includes(error.status)) {
+          if ([401, 403, 404, 422].includes(error.status)) {
             turn.connectionError = error.status === 404 ? '该轮次已清理或不可访问，无法恢复。可以发送新一轮消息。' : error.message
-            turn.unavailable = error.status === 404
+            turn.unavailable = true
             turn.connection = 'disconnected'
             sync(conversation)
             break
           }
           recover = true
           turn.connectionError = error.message || '连接失败'
-          if (++failures >= 5) { turn.connection = 'disconnected'; break }
           turn.connection = 'recovering'
-          await delay(Math.min(1000 * 2 ** (failures - 1), 8000), controller.signal)
+          await delay(retryDelay, controller.signal)
+          retryDelay = Math.min(retryDelay * 2, 8000)
         }
       }
     } finally {

@@ -8,10 +8,12 @@ export function createMessageScrollFollower(list, content) {
   let pinnedMessage = null
   let layoutHold = false
   let layoutHoldTimer = null
+  let statusTransition = null
   const listeners = []
   const atBottom = () => list.scrollHeight - list.clientHeight - list.scrollTop <= 2
   function pause() {
     following = false
+    statusTransition = null
     cancelAnimationFrame(frame)
     frame = 0
   }
@@ -19,16 +21,30 @@ export function createMessageScrollFollower(list, content) {
     if (!active || layoutHold) return
     updatePinnedHeight()
     if (!following || frame) return
-    frame = requestAnimationFrame(() => {
+    frame = requestAnimationFrame((now) => {
       frame = 0
       if (!active || !following || layoutHold) return
-      // 跟随实际渲染高度，不反复启动 smooth 滚动与流式逐字动画竞争。
-      list.scrollTop = list.scrollHeight
+      // 新状态先占位再淡入，直接追到底部会使所有已显示内容瞬间上移。
+      // 仅在状态切换期间缓动；正文增量仍按实际渲染高度跟随。
+      if (statusTransition) {
+        statusTransition.startedAt ??= now
+        const progress = Math.min(1, (now - statusTransition.startedAt) / 380)
+        const target = Math.max(0, list.scrollHeight - list.clientHeight)
+        list.scrollTop = statusTransition.top + (target - statusTransition.top) * (1 - (1 - progress) ** 3)
+        if (progress === 1) statusTransition = null
+      } else list.scrollTop = list.scrollHeight
       lastTop = list.scrollTop
+      if (statusTransition) schedule()
     })
   }
   function resume() { following = true; schedule() }
+  function transitionStatus() {
+    if (!active || !following || layoutHold || statusTransition) return
+    statusTransition = { top: list.scrollTop, startedAt: null }
+    schedule()
+  }
   function holdLayout() {
+    statusTransition = null
     layoutHold = true
     clearTimeout(layoutHoldTimer)
     cancelAnimationFrame(frame)
@@ -96,6 +112,7 @@ export function createMessageScrollFollower(list, content) {
     if (!active) return
     savedTop = list.scrollTop
     active = false
+    statusTransition = null
     cancelAnimationFrame(frame)
     frame = 0
     clearTimeout(layoutHoldTimer)
@@ -116,7 +133,7 @@ export function createMessageScrollFollower(list, content) {
   }
   schedule()
   return {
-    pause, resume, pin, clearPin, holdLayout, suspend, activate,
+    pause, resume, pin, clearPin, holdLayout, transitionStatus, suspend, activate,
     isFollowing: () => following,
     dispose() {
       active = false

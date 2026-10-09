@@ -184,6 +184,10 @@ watch(() => [currentConversation.value.id, messages.value, tailActivity.value], 
   }
   if (!props.active || currentConversation.value.historyLoading) return
   const knownIds = new Set(previous[1].map(message => message.id))
+  const hasNewProgress = nextMessages.some(message => message.settledProgress && message.progressActive && !message.fromHistory && !knownIds.has(message.id))
+  if ((hasNewProgress || Boolean(previous[2]) !== Boolean(activity)) && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    messageScrollFollower?.transitionStatus()
+  }
   for (const message of nextMessages) {
     if (!message.settledProgress || !message.progressActive || message.fromHistory || knownIds.has(message.id)) continue
     if (previous[2]?.thinking) delayedProgressIds.value = new Set([...delayedProgressIds.value, message.id])
@@ -1123,7 +1127,11 @@ onBeforeUnmount(() => {
             >
               <div v-if="message.settledProgress" class="communication-step" :class="{ 'communication-step--settled': !message.progressActive }">
                 <img class="communication-progress-icon" :src="progressImages[message.settledProgress.type]" width="16" height="16" alt="" aria-hidden="true" />
-                <span>{{ taskProgressPresentation(message.settledProgress, Boolean(message.progressActive)).text }}</span>
+                <span class="communication-step__label">
+                  <span class="communication-step__measure" aria-hidden="true">{{ taskProgressPresentation(message.settledProgress, true).text }}</span>
+                  <span class="communication-step__text">{{ taskProgressPresentation(message.settledProgress, Boolean(message.progressActive)).text }}</span>
+                  <span class="communication-step__pulse" aria-hidden="true"><span>{{ taskProgressPresentation(message.settledProgress, Boolean(message.progressActive)).text }}</span></span>
+                </span>
               </div>
               <div v-else-if="message.historyError" class="communication-status" role="alert"><p class="is-error">{{ message.content }}</p></div>
               <div v-else-if="message.role === 'assistant'" class="contract-agent__response">
@@ -1267,11 +1275,10 @@ onBeforeUnmount(() => {
 
             <div v-if="restoring" class="communication-status" role="status">正在恢复对话…</div>
             <div v-if="currentTurn" class="communication-status" aria-live="polite">
-              <p v-if="replying && !currentConversation.submitting && ['recovering', 'disconnected'].includes(currentTurn.connection)">{{ currentTurn.connection === 'recovering' ? '连接中断，正在恢复…' : '连接已断开，轮次状态待确认' }}</p>
+              <p v-if="replying && !currentConversation.submitting && currentTurn.connection === 'recovering'">连接中断，正在自动重连…</p>
               <p v-if="currentTurn.error" class="is-error" role="alert">{{ currentTurn.error.message }}</p>
               <template v-if="currentTurn.connection === 'disconnected'">
                 <p class="is-error">{{ currentTurn.connectionError }}</p>
-                <button v-if="!currentTurn.unavailable" type="button" @click="communication.connect(currentConversation, currentTurn, true)">恢复连接</button>
               </template>
             </div>
 
@@ -1555,12 +1562,28 @@ onBeforeUnmount(() => {
   opacity: 0;
 }
 .communication-status:empty { display: none; }
-.communication-step { font-size: 12px; transition: color 0.3s ease; margin-inline: 2px; display: flex; align-items: center; gap: 6px; }
+.communication-step { min-width: 0; max-width: 100%; font-size: 12px; font-weight: 400; transition: color 0.3s ease; margin-inline: 2px; display: flex; align-items: center; gap: 6px; }
+/* 保留进行中文案的占位，完成文案缩短后不使换行和列表高度回缩。 */
+.communication-step__label { display: grid; min-width: 0; }
+.communication-step__label > span { grid-area: 1 / 1; }
+.communication-step__measure { visibility: hidden; pointer-events: none; user-select: none; }
+.communication-step__text { color: #9ca59f; }
+/* 独立高亮层呼吸；结束时暂停在当前亮度并淡出，不突然撤销动画颜色。 */
+.communication-step__pulse { color: #344c3e; opacity: 1; transition: opacity 0.3s ease; pointer-events: none; user-select: none; }
+.communication-step__pulse > span { animation: communication-step-breathe 2.8s ease-in-out infinite; }
+.communication-step--settled .communication-step__pulse { opacity: 0; }
+.communication-step--settled .communication-step__pulse > span { animation-play-state: paused; }
+@keyframes communication-step-breathe {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 1; }
+}
 .communication-progress-icon { transition: opacity 0.3s ease, filter 0.3s ease; display: block; flex: 0 0 16px; width: 16px; height: 16px; object-fit: contain; }
-.communication-step--settled { color: #9ca59f; font-weight: 400; }
+.communication-step--settled { color: #9ca59f; }
 .communication-step--settled .communication-progress-icon { opacity: .55; filter: grayscale(1); }
-.communication-step.communication-step--settled > span { animation: none; }
 @media (prefers-reduced-motion: reduce) {
+  .communication-step,
+  .communication-step__pulse,
+  .communication-progress-icon,
   .turn-timing-enter-active,
   .turn-timing-leave-active { transition: none; }
 }
@@ -2530,8 +2553,7 @@ button.contract-agent__sent-file-content:focus-visible { outline: 2px solid #719
   line-height: 24px;
 }
 
-.contract-agent__thinking,
-.communication-step > span {
+.contract-agent__thinking {
   animation: contract-agent-thinking-highlight 2.8s ease-in-out infinite;
 }
 
@@ -3037,7 +3059,7 @@ button.contract-agent__sent-file-content:focus-visible { outline: 2px solid #719
   }
 
   .contract-agent__thinking,
-  .communication-step > span {
+  .communication-step__pulse > span {
     animation: none;
   }
 

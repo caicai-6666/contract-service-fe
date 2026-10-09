@@ -51,8 +51,8 @@ export function turnTimingLabel(turn, now = Date.now()) {
   const milliseconds = turnDurationMs(turn, now)
   if (milliseconds === null) return turn?.status === 'superseded' ? '已调整任务方向' : ''
   const seconds = Math.floor(milliseconds / 1000)
-  if (turn.status === 'superseded') return `你在 ${seconds} 秒后调整了方向`
-  return turn.status === 'cancelled' ? `你在 ${seconds} 秒后手动停止` : `已经处理 ${seconds} 秒`
+  const duration = seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+  return TERMINAL_TURN_STATUSES.has(turn.status) ? `用时 ${duration}` : `已经处理 ${duration}`
 }
 
 export function turnStartTime(turn, now = Date.now()) {
@@ -180,6 +180,8 @@ export function applyTurnSnapshot(turn, snapshot) {
     || !statuses.has(snapshot.status) || !Array.isArray(snapshot.messages)) throw new Error('对话快照不匹配')
   const last = sequence(snapshot.last_sequence)
   if (last < sequence(turn.last_sequence)) return
+  // 同一轮次的终态不可逆；迟到的恢复响应不能重新打开已结束的任务。
+  if (TERMINAL_TURN_STATUSES.has(turn.status) && snapshot.status !== turn.status) return
   const canInterrupt = interruptionPermission(snapshot)
   if (snapshot.progress != null) validateTaskProgress(snapshot.progress)
   const ids = new Set()
@@ -188,6 +190,15 @@ export function applyTurnSnapshot(turn, snapshot) {
       || typeof message.text !== 'string' || !['streaming', 'completed', 'interrupted'].includes(message.status)
       || !Array.isArray(message.references)) throw new Error('对话消息快照无效')
     ids.add(message.message_id)
+  }
+  // completed final 已正式交付，后端契约不允许撤回、改写或降为半成品。
+  // 不接纳矛盾快照，也不推进游标，由连接层继续恢复，界面保留已交付结果。
+  const completedFinal = turn.messages.find(message => message.message_kind === 'final' && message.status === 'completed')
+  if (completedFinal) {
+    const restored = snapshot.messages.find(message => message.message_id === completedFinal.message_id)
+    if (!restored || restored.message_kind !== 'final' || restored.status !== 'completed' || restored.text !== completedFinal.text) {
+      throw new Error('恢复快照与已完成的最终答复不一致，正在重新恢复')
+    }
   }
   if (snapshot.messages.length || TERMINAL_TURN_STATUSES.has(snapshot.status)) settleTurnProgress(turn)
   Object.assign(turn, snapshot, { can_interrupt: canInterrupt, last_sequence: last.toString(), messages: snapshot.messages.map((m) => ({ ...m })) })
