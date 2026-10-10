@@ -2,6 +2,8 @@
 
 > 本页是“现象合同智能管理平台”前端项目 `description/` 目录的统一入口，只链接当前真实存在且有效的文档。
 
+项目功能概览、实机演示截图和快速开始见根目录 [README](../README.md)。截图资源保存在 `description/assets/screenshots/`。
+
 ---
 
 ## 从哪里开始
