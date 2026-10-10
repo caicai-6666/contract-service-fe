@@ -43,31 +43,25 @@ function closePreview() {
   deletionError.value = ''
 }
 
-async function deletePreviewDocument() {
-  if (deletionPending.value || !previewDocument.value) return
+async function deletePreviewDocument({ note } = {}) {
+  if (deletionPending.value || !previewDocument.value || !previewCanDelete.value) return
   const documentId = previewDocument.value.id
-  const fileUri = previewDocument.value.fileUri
   deletionPending.value = true
   deletionError.value = ''
-  // 删除不因弹窗关闭而取消；中途断开不能代表服务端已停止清理。
+  // 写请求不因关闭取消；中途断开不能代表服务端没有保存申请。
   documentController?.abort()
   documentController = null
   documentsLoading.value = false
   try {
-    await deleteContractDocument(documentId)
-    pdfCache.remove(fileUri)
+    await deleteContractDocument(documentId, { note })
     if (disposed) return
-    documentModels.value = documentModels.value.filter((document) => document.id !== documentId)
-    if (selectedYear.value && !documentModels.value.some((document) => document.date?.startsWith(selectedYear.value))) {
-      updateDateFilter({ year: null, month: null, day: null })
-    }
+    documentModels.value = documentModels.value.map(document => document.id === documentId ? { ...document, canDelete: false } : document)
     deletionPending.value = false
-    closePreview()
     await loadDocuments()
   } catch (error) {
     if (!disposed) deletionError.value = error instanceof TypeError
-      ? '网络中断，删除结果未确认。请重试同一合同或刷新目录核对。'
-      : error.message || '删除失败，请重试'
+      ? '网络中断，删除申请结果未确认。请先在信箱中核对申请，再刷新合同目录。'
+      : error.message || '删除申请失败，请刷新目录或核对审核日志'
   } finally {
     deletionPending.value = false
   }
@@ -97,6 +91,7 @@ async function openPreview(document, { reload = false } = {}) {
 const currentUploaderName = getAuthSession()?.userName ?? ''
 const uploaderScope = ref('all')
 const documentModels = ref([])
+const previewCanDelete = computed(() => documentModels.value.find(document => document.id === previewDocument.value?.id)?.canDelete === true)
 const documentsLoading = ref(true)
 const documentsLoaded = ref(false)
 const documentsError = ref('')
@@ -484,6 +479,7 @@ watch([documentsLoading, documentsError], () => {
     show-links
     :notes-saving="notesSaving || linksSaving"
     show-delete
+    :can-delete="previewCanDelete"
     :open="active && Boolean(previewDocument)"
     :src="previewUrl"
     :label="previewDocument?.name || '合同'"

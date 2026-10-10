@@ -6,7 +6,9 @@ import ContractLibraryView from './components/ContractLibraryView.vue'
 import ContractNetworkView from './components/ContractNetworkView.vue'
 import LoginCard from './components/LoginCard.vue'
 import MolecularFieldBackground from './components/MolecularFieldBackground.vue'
+import ReviewLogDialog from './components/ReviewLogDialog.vue'
 import logoUrl from './assets/logo.webp'
+import mailboxUrl from './assets/mailbox.webp'
 import {
   AUTH_EXPIRED_EVENT,
   clearAuthSession,
@@ -20,6 +22,7 @@ const loginError = ref('')
 const loginNotice = ref('')
 const authSession = ref(initialAuthSession)
 const visualEffectsPaused = ref(false)
+const reviewLogOpen = ref(false)
 const route = useRoute()
 const router = useRouter()
 
@@ -64,6 +67,7 @@ function clearLoginMessage() {
 }
 
 function logout({ expired = false } = {}) {
+  reviewLogOpen.value = false
   loginRequestController?.abort()
   loginRequestController = null
   clearAuthSession()
@@ -90,6 +94,7 @@ function navigateToSection(section) {
 
 watch(() => route.fullPath, () => {
   visualEffectsPaused.value = false
+  reviewLogOpen.value = false
 })
 
 window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
@@ -154,6 +159,17 @@ onBeforeUnmount(() => {
             </span>
             <button
               type="button"
+              class="prototype-workspace__mailbox"
+              aria-label="信箱：查看审核日志"
+              aria-haspopup="dialog"
+              :aria-expanded="reviewLogOpen"
+              title="审核日志"
+              @click="reviewLogOpen = true"
+            >
+              <img :src="mailboxUrl" alt="" draggable="false" />
+            </button>
+            <button
+              type="button"
               class="prototype-workspace__logout"
               aria-label="退出登录"
               title="退出登录"
@@ -206,6 +222,7 @@ onBeforeUnmount(() => {
             </section>
           </div>
         </div>
+        <ReviewLogDialog :open="reviewLogOpen" @close="reviewLogOpen = false" />
       </section>
     </Transition>
   </main>

@@ -14,6 +14,7 @@ export function modelContractDocuments(payload) {
       || ids.has(item.document_id)
       || !['file_name', 'category', 'file_uri', 'uploader', 'ingested_at'].every((key) => typeof item[key] === 'string')
       || !item.file_name.trim() || !item.uploader.trim()
+      || typeof item.can_delete !== 'boolean'
       || !item.file_uri.startsWith('/') || item.file_uri.startsWith('//')
       || !isContractDate(item.contract_time)
       || !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/i.test(item.ingested_at)
@@ -29,6 +30,7 @@ export function modelContractDocuments(payload) {
       date: item.contract_time,
       fileUri: item.file_uri,
       uploader: item.uploader,
+      canDelete: item.can_delete,
       ingestedAt: item.ingested_at,
     }
   })

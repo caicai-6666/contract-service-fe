@@ -18,7 +18,6 @@ import ContractDateWheel from './ContractDateWheel.vue'
 import MarkdownMessage from './MarkdownMessage.vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
 import BatchExtractionDialog from './BatchExtractionDialog.vue'
-import ReviewLogDialog from './ReviewLogDialog.vue'
 import { serializeCoreProperty, validateCoreProperty } from '../models/coreDefinitions.js'
 import { deduplicationInteraction } from '../models/deduplicationReview.js'
 import { awaitsExtractionFollowup } from '../models/extractionEventLifecycle.js'
@@ -45,7 +44,6 @@ defineOptions({ name: 'ContractIngestionView' })
 const props = defineProps({ active: { type: Boolean, default: true } })
 const emit = defineEmits(['visual-pause-change'])
 const batchExtractionOpen = ref(false)
-const reviewLogOpen = ref(false)
 
 const stageOrder = ['detection', 'duplication', 'preprocessing', 'classification', 'overview', 'field', 'clause', 'retrieval']
 const PDF_COVER_MAX_RASTER_SIDE = 1600
@@ -3417,12 +3415,6 @@ onBeforeUnmount(() => {
           <span>批量提取</span>
         </button>
       </div>
-      <div class="contract-action-pedestal">
-        <button type="button" class="contract-new-trigger" @click="reviewLogOpen = true">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14V8l-5-5ZM14 3v5h5M8 12h8M8 16h5" /></svg>
-          <span>审核日志</span>
-        </button>
-      </div>
     </div>
 
     <div
@@ -4860,7 +4852,6 @@ onBeforeUnmount(() => {
       </div>
     </Transition>
 
-    <ReviewLogDialog :open="active && reviewLogOpen" @close="reviewLogOpen = false" />
     <BatchExtractionDialog :open="active && batchExtractionOpen" @close="batchExtractionOpen = false" @created="refreshExtractionRuns({ showLoader: false })" @tasks="runsPanelOpen || toggleRunsPanel()" />
 
     <PdfPreviewOverlay

@@ -1,6 +1,6 @@
 import { CONTRACT_API_BASE_PATH, contractApiFetch, ContractApiError } from './contractApi.js'
 import { isSubmissionId, modelReviewIds, modelReviewDetail, modelCleanupPolicy } from '../models/pendingReviews.js'
-const base = `${CONTRACT_API_BASE_PATH}/pending-reviews`
+const base = `${CONTRACT_API_BASE_PATH}/ingestion-reviews`
 async function read(path, signal) {
   const response = await contractApiFetch(path, { signal, cache: 'no-store' })
   const payload = await response.json().catch(() => null)

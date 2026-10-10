@@ -19,6 +19,7 @@ const props = defineProps({
   error: { type: String, default: '' },
   retryable: { type: Boolean, default: true },
   showDelete: { type: Boolean, default: false },
+  canDelete: { type: Boolean, default: false },
   showToolbar: { type: Boolean, default: false },
   showLinks: { type: Boolean, default: false },
   showNotes: { type: Boolean, default: false },
@@ -28,6 +29,9 @@ const props = defineProps({
 })
 
 const deleteConfirmation = ref(false)
+const deleteNote = ref('')
+const deleteNoteLength = computed(() => [...deleteNote.value].length)
+const deleteNoteInput = ref(null)
 const actionsOpen = ref(false)
 const activePanel = ref('')
 const panelOpen = computed(() => Boolean(activePanel.value))
@@ -60,11 +64,15 @@ async function closePanel() {
   actionsButton.value?.focus()
 }
 const deleteButton = ref(null)
-const cancelDeleteButton = ref(null)
 async function openDeleteConfirmation() {
+  if (!props.canDelete || props.deleting) return
   deleteConfirmation.value = true
   await nextTick()
-  cancelDeleteButton.value?.focus()
+  deleteNoteInput.value?.focus()
+}
+function submitDelete() {
+  if (!deleteConfirmation.value || !props.canDelete || props.deleting || deleteNoteLength.value > 10000) return
+  emit('delete', { note: deleteNote.value })
 }
 function cancelDelete() {
   if (props.deleting) return
@@ -77,6 +85,13 @@ watch([() => props.open, () => props.src], () => {
   actionsOpen.value = false
   activePanel.value = ''
 })
+watch([() => props.open, () => props.summaryDocumentId], () => { deleteNote.value = '' })
+watch(() => props.canDelete, allowed => {
+  if (!allowed) {
+    deleteConfirmation.value = false
+    actionsOpen.value = false
+  }
+})
 
 const frameLoaded = ref(false)
 const readerError = ref('')
@@ -88,7 +103,7 @@ watch([() => props.open, () => props.src, () => props.loading], () => {
   readerError.value = ''
 }, { flush: 'sync' })
 
-defineEmits(['close', 'retry', 'delete', 'pin'])
+const emit = defineEmits(['close', 'retry', 'delete', 'pin'])
 </script>
 
 <template>
@@ -172,8 +187,9 @@ defineEmits(['close', 'retry', 'delete', 'pin'])
             ref="deleteButton"
             class="pdf-preview__delete"
             type="button"
-            aria-label="删除合同"
-            title="删除合同"
+            aria-label="申请删除合同"
+            :title="canDelete ? '申请删除合同' : '已有删除申请，暂不可重复提交'"
+            :disabled="!canDelete || deleting"
             :aria-expanded="deleteConfirmation"
             @click="deleteConfirmation ? cancelDelete() : openDeleteConfirmation()"
           >
@@ -181,14 +197,23 @@ defineEmits(['close', 'retry', 'delete', 'pin'])
           </button>
           </div>
           <Transition name="pdf-delete">
-            <div v-if="showDelete && deleteConfirmation" class="pdf-preview__delete-confirm" role="group" aria-label="删除合同确认">
-              <h3>删除这份合同？</h3>
+            <div v-if="showDelete && canDelete && deleteConfirmation" class="pdf-preview__delete-confirm" role="group" aria-label="申请删除合同确认">
+              <h3>申请删除这份合同？</h3>
               <p class="pdf-preview__delete-name">{{ label }}</p>
-              <p class="pdf-preview__delete-note">将删除正式合同 PDF、检索数据和目录记录。此操作不自动备份，无法撤销。</p>
+              <p class="pdf-preview__delete-note">提交后进入删除审核，审核通过后由后台删除。审核结果可在信箱中查看。</p>
+              <label class="pdf-preview__delete-field">
+                <span>申请备注</span>
+                <textarea ref="deleteNoteInput" v-model="deleteNote" rows="3" :disabled="deleting"
+                  :aria-invalid="deleteNoteLength > 10000" aria-describedby="contract-delete-note-length"
+                  placeholder="填写删除原因或审核沟通备注（可留空）"></textarea>
+              </label>
+              <p id="contract-delete-note-length" class="pdf-preview__delete-length" :class="{ 'is-invalid': deleteNoteLength > 10000 }">
+                {{ deleteNoteLength > 10000 ? '申请备注不能超过 10000 个字符' : `${deleteNoteLength} / 10000` }}
+              </p>
               <p v-if="deleteError" class="pdf-preview__delete-error" role="alert">{{ deleteError }}</p>
               <div class="pdf-preview__delete-actions">
-                <button ref="cancelDeleteButton" type="button" :disabled="deleting" @click="cancelDelete">保留合同</button>
-                <button class="pdf-preview__delete-submit" type="button" :disabled="deleting" @click="$emit('delete')">{{ deleting ? '正在删除…' : deleteError ? '重试删除' : '确认删除' }}</button>
+                <button type="button" :disabled="deleting" @click="cancelDelete">保留合同</button>
+                <button class="pdf-preview__delete-submit" type="button" :disabled="deleting || !canDelete || deleteNoteLength > 10000" @click="submitDelete">{{ deleting ? '正在提交…' : '提交删除审核' }}</button>
               </div>
             </div>
           </Transition>
@@ -402,8 +427,9 @@ defineEmits(['close', 'retry', 'delete', 'pin'])
 .pdf-preview__notes-toggle[aria-expanded="true"],
 .pdf-preview__notes-toggle:hover { background: #e4ece2; }
 .pdf-preview__notes-toggle:disabled { opacity: .45; cursor: wait; }
-.pdf-preview__delete:hover,
+.pdf-preview__delete:hover:not(:disabled),
 .pdf-preview__delete[aria-expanded="true"] { background: #bd3847; color: #fff; }
+.pdf-preview__delete:disabled { color: #a1aaa3; background: #eff1ee; box-shadow: none; cursor: not-allowed; }
 .pdf-preview__notes-toggle svg,
 .pdf-preview__delete svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .pdf-preview__notes-toggle:focus-visible,
@@ -416,6 +442,8 @@ defineEmits(['close', 'retry', 'delete', 'pin'])
   top: 50%;
   right: 138px;
   width: min(310px, calc(100% - 158px));
+  max-height: calc(100% - 40px);
+  overflow-y: auto;
   transform: translateY(-50%);
   padding: 20px;
   box-sizing: border-box;
@@ -428,6 +456,13 @@ defineEmits(['close', 'retry', 'delete', 'pin'])
 .pdf-preview__delete-confirm h3 { margin: 0; font-size: 16px; font-weight: 600; }
 .pdf-preview__delete-name { margin: 10px 0 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .pdf-preview__delete-note { margin: 14px 0 18px; color: #788078; font-size: 12px; line-height: 1.6; }
+.pdf-preview__delete-field { display: grid; gap: 8px; font-size: 12px; }
+.pdf-preview__delete-field textarea { box-sizing: border-box; width: 100%; min-height: 82px; resize: vertical; padding: 10px; border: 1px solid #cad6c9; border-radius: 10px; background: #ffffffba; color: #30443a; font: inherit; font-size: 13px; line-height: 1.7; }
+.pdf-preview__delete-field textarea::placeholder { color: #97a193; }
+.pdf-preview__delete-field textarea:focus { outline: none; border-color: #829d88; }
+.pdf-preview__delete-field textarea:disabled { opacity: .65; }
+.pdf-preview__delete-length { margin: 6px 0 16px; text-align: right; color: #788078; font-size: 11px; }
+.pdf-preview__delete-length.is-invalid { color: #a13e49; }
 .pdf-preview__delete-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .pdf-preview__delete-actions button { padding: 8px 12px; border: 1px solid #d9e1da; border-radius: 8px; color: #405a49; background: #edf1eb; font-size: 12px; cursor: pointer; }
 .pdf-preview__delete-actions .pdf-preview__delete-submit { border-color: #a23f4b; background: #b74654; color: #fff; }
@@ -542,13 +577,10 @@ defineEmits(['close', 'retry', 'delete', 'pin'])
   .pdf-preview__notes-layer { padding: 16px; }
   .pdf-preview__layout { height: 100%; }
   .pdf-preview__delete-confirm {
-    top: calc(50% + 30px);
+    top: 50%;
     right: 20px;
     width: min(310px, calc(100% - 40px));
-    transform: none;
   }
-  .pdf-delete-enter-from,
-  .pdf-delete-leave-to { transform: translateY(-5px); }
 
   .pdf-preview__viewer {
     width: 100%;
