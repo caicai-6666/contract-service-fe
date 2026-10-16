@@ -2,6 +2,7 @@
 import ContractPdfReader from './ContractPdfReader.vue'
 import PdfLoadingAnimation from './PdfLoadingAnimation.vue'
 import ContractSummaryPopover from './ContractSummaryPopover.vue'
+import ContractPassportsPopover from './ContractPassportsPopover.vue'
 import alertListIcon from '../assets/alert-list.webp'
 import pinIcon from '../assets/pin.webp'
 import linkIcon from '../assets/link.webp'
@@ -15,6 +16,8 @@ const props = defineProps({
   src: { type: String, default: '' },
   label: { type: String, default: 'PDF 文档' },
   summaryDocumentId: { type: String, default: '' },
+  showPassports: { type: Boolean, default: false },
+  passports: { type: Array, default: null },
   loading: { type: Boolean, default: false },
   error: { type: String, default: '' },
   retryable: { type: Boolean, default: true },
@@ -161,6 +164,7 @@ const emit = defineEmits(['close', 'retry', 'delete', 'pin'])
           <button v-if="showPin && !panelOpen" type="button" class="pdf-preview__pin" :class="{ 'is-pinned': pinned }" :aria-pressed="pinned" :aria-label="pinned ? '取消引用当前合同' : '引用当前合同到会话'" :title="pinned ? '已加入会话，点击取消引用' : '引用到会话'" @click="$emit('pin')">
             <img :src="pinIcon" alt="" />
           </button>
+          <ContractPassportsPopover v-if="showPassports && summaryDocumentId && !panelOpen" :key="`passports:${summaryDocumentId}`" :document-id="summaryDocumentId" :passports="passports" />
 
           <!-- Interaction adapted from Uiverse.io by ElgyoshiMa91846 -->
           <div v-if="showToolbar && !loading" class="pdf-preview__actions" :class="{ 'is-open': actionsOpen || deleteConfirmation }" @mouseleave="actionsOpen = false">
@@ -344,7 +348,7 @@ const emit = defineEmits(['close', 'retry', 'delete', 'pin'])
 }
 
 .pdf-preview__viewer iframe.is-ready { opacity: 1; pointer-events: auto; }
-.pdf-preview__pin { position: absolute; z-index: 3; top: 124px; left: 20px; display: grid; place-items: center; width: 38px; height: 38px; padding: 9px; border: 1px solid #ffffffb3; border-radius: 50%; background: linear-gradient(145deg, #f0f5fb, #d5e1ef); color: #466483; box-shadow: 0 4px 14px #243c5926, inset 0 1px #fff; cursor: pointer; transition: background .18s, transform .18s; }
+.pdf-preview__pin { position: absolute; z-index: 3; top: 76px; left: 68px; display: grid; place-items: center; width: 38px; height: 38px; padding: 9px; border: 1px solid #ffffffb3; border-radius: 50%; background: linear-gradient(145deg, #f0f5fb, #d5e1ef); color: #466483; box-shadow: 0 4px 14px #243c5926, inset 0 1px #fff; cursor: pointer; transition: background .18s, transform .18s; }
 .pdf-preview__pin:hover { transform: translateY(-1px); }
 .pdf-preview__pin.is-pinned { background: #486a84; color: #fff; }
 .pdf-preview__pin:focus-visible { outline: 2px solid #829fbe; outline-offset: 3px; }

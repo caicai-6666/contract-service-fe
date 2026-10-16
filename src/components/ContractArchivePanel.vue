@@ -92,6 +92,7 @@ const currentUploaderName = getAuthSession()?.userName ?? ''
 const uploaderScope = ref('all')
 const documentModels = ref([])
 const previewCanDelete = computed(() => documentModels.value.find(document => document.id === previewDocument.value?.id)?.canDelete === true)
+const previewPassports = computed(() => documentModels.value.find(document => document.id === previewDocument.value?.id)?.passport ?? null)
 const documentsLoading = ref(true)
 const documentsLoaded = ref(false)
 const documentsError = ref('')
@@ -472,6 +473,8 @@ watch([documentsLoading, documentsError], () => {
   <PdfPreviewOverlay
     controlled-reader
     show-pin
+    show-passports
+    :passports="previewPassports"
     :pinned="pinnedContractIds.includes(previewDocument?.id)"
     @pin="previewDocument && emit('pin-contract', previewDocument)"
     show-toolbar

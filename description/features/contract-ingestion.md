@@ -189,6 +189,8 @@ HTTP 回执校验 `status=submitted` 并保留 `submission_id`、`document_id`�
 
 删除申请中的名称、摘要、上传人及原入库时间来自冻结快照；历史摘要为 null 显示“尚未保存摘要”。申请人备注与审核平台备注分别展示，`review.status=approved` 与 `deletion.status=pending/deleting/failed` 可并存，只有 succeeded 显示删除成功，拒绝且 pending 显示“不删除”。不展示通行证、合同 ID 或内部错误。
 
+入库详情 `review.passport` 与删除详情 `passport` 同步采用完整字符串数组或 null，复用合同目录的通行证集合校验。数组项须为非空白字符串，不裁剪、不去重、不转换为单个字符串，空数组和 null 分别保留；不会因为审核反馈包含多份通行证而拒绝整条详情。通行证仍不在审核日志界面展示。
+
 删除审核 PDF 仅在详情的 `pdf.url` 非空时可预览；请求由资源服务基于校验过的 `file_uri` 构造 `GET /contract/api/resource/contract?file_uri=...`，不向响应中的任意 URL 发送凭据。url 为 null 时禁用入口并移除对应缓存，刷新或详情失效也清理当前类型的相关缓存；预览请求并发遇到删除返回 404 时显示资源不可用，并禁用旧入口。旧申请不可用时不从正式目录重新查找或替换为同 document_id 的新版本。
 
 入库和删除审核的清理倒计时均以详情 `cleanup.eligible_at` 为唯一截止时刻，以其 `server_time` 加本机单调时钟经过的时长计算，不使用本机墙上时间、created_at 或 reviewed_at 推算。左侧表项右下角仅在 eligible_at 非空时显示剩余多久后清理，0 时显示“等待清理”，为 null 时不显示；不主动移除记录。删除审核批准后仅在实际删除完成时开始计时；拒绝后需等本地标志协调完成，审核反馈已到达但 cleanup 仍为 null 时继续隐藏倒计时。计时只依返回字段，不从状态或 completed_at 推算。倒计时直接使用详情字段，不额外请求清理策略接口。关闭弹窗停止时钟，重新打开以新服务器时间校准。

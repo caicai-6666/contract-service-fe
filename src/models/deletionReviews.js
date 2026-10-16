@@ -1,4 +1,5 @@
 import { deliveryLabels, isSubmissionId, modelReviewIds, reviewLabels } from './pendingReviews.js'
+import { isContractPassports } from './contractPassports.js'
 
 export { modelReviewIds as modelDeletionReviewIds }
 export const deletionLabels = { pending: '待删除', deleting: '删除中', succeeded: '删除成功', failed: '删除失败' }
@@ -12,7 +13,7 @@ export function modelDeletionReviewDetail(value, id) {
     || !/^[a-f0-9]{64}$/.test(value.document_id ?? '')
     || !['file_name', 'uploader', 'requested_by', 'note'].every(key => typeof value[key] === 'string')
     || !['file_name', 'uploader', 'requested_by'].every(key => value[key].trim())
-    || !nullableText(value.summary) || !nullableText(value.passport)
+    || !nullableText(value.summary) || !isContractPassports(value.passport)
     || !isTime(value.contract_ingested_at)
     || !['created_at', 'updated_at', 'server_time'].every(key => isTime(value[key]))
     || !Object.hasOwn(deliveryLabels, value.delivery?.status) || !nullableText(value.delivery?.message_id)

@@ -1,3 +1,5 @@
+import { isContractPassports } from './contractPassports.js'
+
 export const deliveryLabels = { pending: '待发送', publishing: '发送中', published: '已发送', uncertain: '发送结果待确认', blocked: '发送受阻' }
 export const reviewLabels = { pending_send: '尚未送审', pending_review: '等待审核', approved: '审核通过', rejected: '审核拒绝' }
 export const ingestionLabels = { pending: '待处理', ingesting: '入库中', succeeded: '入库成功', failed: '入库失败' }
@@ -25,7 +27,8 @@ export function modelReviewDetail(value, id) {
     || !['created_at', 'updated_at', 'server_time'].every(key => isTime(value[key]))
     || !Object.hasOwn(deliveryLabels, value.delivery?.status) || !nullableText(value.delivery?.message_id)
     || !Object.hasOwn(reviewLabels, value.review?.status)
-    || !['note', 'reviewer', 'passport'].every(key => nullableText(value.review[key])) || !nullableTime(value.review.reviewed_at)
+    || !['note', 'reviewer'].every(key => nullableText(value.review[key])) || !nullableTime(value.review.reviewed_at)
+    || !isContractPassports(value.review.passport)
     || !Object.hasOwn(ingestionLabels, value.ingestion?.status) || !nullableTime(value.ingestion.ingested_at)
     || !value.cleanup || !nullableTime(value.cleanup.review_processed_at) || !nullableTime(value.cleanup.eligible_at)
     || typeof value.pdf?.relative_path !== 'string' || typeof value.pdf?.url !== 'string') return invalid()
