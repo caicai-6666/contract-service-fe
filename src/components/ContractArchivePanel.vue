@@ -1,4 +1,6 @@
 <script setup>
+import CenteredLoading from './CenteredLoading.vue'
+import EmptyState from './EmptyState.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { deleteContractDocument, getContractCategories, getContractDocuments } from '../services/contractLibraryApi.js'
 import { filterContractDocuments, formatIngestionDate, resolveDocumentCategories } from '../models/contractDocuments.js'
@@ -21,6 +23,7 @@ let revealFrame = null
 const notesSaving = ref(false)
 const notesSource = { list: getContractNotes, create: createContractNote, remove: deleteContractNote }
 const linksSaving = ref(false)
+const panelCacheRevision = ref(0)
 const previewDocument = ref(null)
 const previewUrl = ref('')
 const previewLoading = ref(false)
@@ -93,6 +96,7 @@ const uploaderScope = ref('all')
 const documentModels = ref([])
 const previewCanDelete = computed(() => documentModels.value.find(document => document.id === previewDocument.value?.id)?.canDelete === true)
 const previewPassports = computed(() => documentModels.value.find(document => document.id === previewDocument.value?.id)?.passport ?? null)
+const previewFileLevel = computed(() => documentModels.value.find(document => document.id === previewDocument.value?.id)?.fileLevel ?? null)
 const documentsLoading = ref(true)
 const documentsLoaded = ref(false)
 const documentsError = ref('')
@@ -158,6 +162,7 @@ let refreshTransitionPending = false
 let resultsLeaveFinished = false
 async function refreshDocuments() {
   if (documentsLoading.value || refreshSpinning.value) return
+  panelCacheRevision.value++
   refreshSpinning.value = !reducedMotion.value
   refreshTransitionPending = true
   resultsLeaveFinished = reducedMotion.value
@@ -191,7 +196,6 @@ function resultSnapshot() {
       entryIndex: group.label ? entryIndex++ : 0,
       contracts: group.contracts.map((contract) => ({ ...contract, entryIndex: entryIndex++ })),
     })),
-    emptyMessage: documentsLoading.value && !documentsLoaded.value ? '正在加载合同…' : documentsError.value || (documentModels.value.length ? '暂无匹配合同' : '暂无已入库合同'),
   }
 }
 
@@ -354,10 +358,7 @@ watch(() => JSON.stringify(contractGroups.value), () => {
   if (!archiveReady.value || reducedMotion.value) revealLatestResults()
   else resultsVisible.value = false
 })
-watch([documentsLoading, documentsError], () => {
-  // 加载提示更新不重播整张列表；刷新期间保留已有内容与滚动位置。
-  displayedResults.value.emptyMessage = resultSnapshot().emptyMessage
-})
+
 </script>
 
 <template>
@@ -383,7 +384,7 @@ watch([documentsLoading, documentsError], () => {
         </button>
       </header>
 
-      <div v-if="categoryLoading" class="contract-archive__category-notice" role="status">正在加载合同类别…</div>
+      <CenteredLoading v-if="categoryLoading" label="正在加载合同类别" style="--loading-min-height: 40px; --loading-size: 18px" />
       <div v-else-if="categoryError" class="contract-archive__category-notice" role="alert">
         <span>{{ categoryError }}</span>
         <button type="button" @click="loadCategories">重试</button>
@@ -443,7 +444,7 @@ watch([documentsLoading, documentsError], () => {
         @before-leave="markVisibleLeavingResults"
         @after-leave="onResultsLeft"
       >
-      <div v-if="resultsVisible" class="contract-archive__result-content">
+      <div v-if="resultsVisible" class="contract-archive__result-content" :class="{ 'is-empty': !displayedResults.groups.length }">
       <section v-for="group in displayedResults.groups" :key="group.key" class="contract-archive__group" :aria-label="group.label || undefined">
         <h3 v-if="group.label" class="contract-archive__group-title" :style="resultEntryStyle(group.entryIndex)">{{ group.label }}</h3>
         <ul class="contract-archive__list">
@@ -464,7 +465,10 @@ watch([documentsLoading, documentsError], () => {
         </ul>
       </section>
       <div v-if="!displayedResults.groups.length && !documentsError" class="contract-archive__empty">
-        <p>{{ displayedResults.emptyMessage }}</p>
+        <Transition name="content-state" mode="out-in" appear>
+          <CenteredLoading v-if="documentsLoading && !documentsLoaded" key="loading" label="正在加载合同" />
+          <EmptyState v-else key="empty" />
+        </Transition>
       </div>
       </div>
       </Transition>
@@ -475,6 +479,8 @@ watch([documentsLoading, documentsError], () => {
     show-pin
     show-passports
     :passports="previewPassports"
+    show-file-level
+    :file-level="previewFileLevel"
     :pinned="pinnedContractIds.includes(previewDocument?.id)"
     @pin="previewDocument && emit('pin-contract', previewDocument)"
     show-toolbar
@@ -487,6 +493,7 @@ watch([documentsLoading, documentsError], () => {
     :src="previewUrl"
     :label="previewDocument?.name || '合同'"
     :summary-document-id="previewDocument?.id || ''"
+    :cache-revision="panelCacheRevision"
     :loading="previewLoading"
     :error="previewError"
     :deleting="deletionPending"
@@ -495,23 +502,25 @@ watch([documentsLoading, documentsError], () => {
     @close="closePreview"
     @retry="openPreview(previewDocument, { reload: true })"
   >
-    <template #links="{ close }">
-      <ContractLinksPanel v-if="previewDocument" :key="previewDocument.id" :document-id="previewDocument.id" :documents="contracts" @saving-change="linksSaving = $event" @close="close" />
-    </template>
-    <template #notes="{ close }">
+    <template #panels="{ panel, close }">
+      <KeepAlive :key="panelCacheRevision" :max="20">
+      <ContractLinksPanel v-if="panel === 'links' && previewDocument" :key="`links:${previewDocument.id}`" :document-id="previewDocument.id" :documents="contracts" @saving-change="linksSaving = $event" @close="close" />
       <ContractNotesPanel
-        v-if="previewDocument"
+        v-else-if="panel === 'notes' && previewDocument"
+        :key="`notes:${previewDocument.id}`"
         :document-id="previewDocument.id"
         :source="notesSource"
         @close="close"
         @saving-change="notesSaving = $event"
         :disabled="deletionPending"
       />
+      </KeepAlive>
     </template>
   </PdfPreviewOverlay>
 </template>
 
 <style scoped>
+.contract-archive__result-content.is-empty { display: flex; flex-direction: column; min-height: 100%; }
 .contract-archive {
   -webkit-user-select: none;
   user-select: none;
@@ -1014,13 +1023,13 @@ watch([documentsLoading, documentsError], () => {
   white-space: nowrap;
 }
 .contract-archive__empty {
-  padding: 44px 12px;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  padding: 24px 12px;
   text-align: center;
   color: #657b6c;
-}
-.contract-archive__empty p {
-  margin: 12px 0 8px;
-  font-size: 14px;
 }
 
 @container (max-width: 560px) {

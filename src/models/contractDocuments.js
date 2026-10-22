@@ -1,5 +1,9 @@
 import { isContractPassports } from './contractPassports.js'
 
+import { isFileLevel } from './fileLevel.js'
+
+export { parseFileLevelJson as parseContractDocumentsJson } from './fileLevel.js'
+
 function isContractDate(value) {
   if (value === null) return true
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
@@ -18,6 +22,7 @@ export function modelContractDocuments(payload) {
       || !item.file_name.trim() || !item.uploader.trim()
       || typeof item.can_delete !== 'boolean'
       || !isContractPassports(item.passport)
+      || !isFileLevel(item.file_level)
       || !item.file_uri.startsWith('/') || item.file_uri.startsWith('//')
       || !isContractDate(item.contract_time)
       || !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/i.test(item.ingested_at)
@@ -35,6 +40,7 @@ export function modelContractDocuments(payload) {
       uploader: item.uploader,
       canDelete: item.can_delete,
       passport: item.passport === null ? null : [...item.passport],
+      fileLevel: item.file_level === null ? null : String(item.file_level),
       ingestedAt: item.ingested_at,
     }
   })

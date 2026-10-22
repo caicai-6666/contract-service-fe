@@ -9,7 +9,7 @@ COPY src ./src
 COPY public ./public
 COPY scripts ./scripts
 # 容器使用正式路径；prebuild 会同步当前依赖版本的 PDF.js 资源。
-RUN npm run build -- --base=/contract/
+RUN npm run build -- --base=/knowledge-accumulation/contract/
 
 FROM nginx:stable-alpine AS runtime
 
@@ -19,7 +19,7 @@ ENV BACKEND_UPSTREAM=contract-service:20000 \
     NGINX_ENVSUBST_FILTER="^(BACKEND_UPSTREAM|CLIENT_MAX_BODY_SIZE|ICON_CACHE_MAX_AGE)$"
 
 COPY nginx.conf /etc/nginx/templates/default.conf.template
-COPY --from=build /workspace/dist /usr/share/nginx/html/contract
+COPY --from=build /workspace/dist /usr/share/nginx/html/knowledge-accumulation/contract
 
 EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \

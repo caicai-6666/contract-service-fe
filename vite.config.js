@@ -3,7 +3,7 @@ import { defineConfig } from 'vite'
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: '/dev/contract/',
+  base: '/dev/knowledge-accumulation/contract/',
   plugins: [vue()],
   build: {
     // 图标独立输出，使用带内容哈希的 URL 和浏览器图片缓存。
@@ -22,7 +22,12 @@ export default defineConfig({
     strictPort: true,
     allowedHosts: ['pheno.szkl.com'],
     proxy: {
-      '/contract/api': {
+      '/dev/knowledge-accumulation/contract/api': {
+        target: 'http://127.0.0.1:20000',
+        changeOrigin: true,
+        rewrite: (path) => path.slice('/dev'.length),
+      },
+      '/knowledge-accumulation/contract/api': {
         target: 'http://127.0.0.1:20000',
         changeOrigin: true,
       },

@@ -10,3 +10,8 @@ export function notifyContractIngested() {
   invalidateContractData()
   contractIngestionRevision.value++
 }
+
+export const reviewDataRevision = ref({ ingestion: 0, deletion: 0 })
+export function invalidateReviewData(kind) {
+  reviewDataRevision.value = { ...reviewDataRevision.value, [kind]: reviewDataRevision.value[kind] + 1 }
+}

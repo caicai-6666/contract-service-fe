@@ -1,5 +1,6 @@
 <script setup>
-import { onBeforeUnmount, ref, useId, watch } from 'vue'
+import CenteredLoading from './CenteredLoading.vue'
+import { onBeforeUnmount, onDeactivated, ref, useId, watch } from 'vue'
 import { getContractSummary } from '../services/contractSummaryApi.js'
 
 const props = defineProps({ documentId: { type: String, required: true } })
@@ -64,6 +65,7 @@ onBeforeUnmount(() => {
   requestController?.abort()
   requestController = null
 })
+onDeactivated(() => { window.clearTimeout(closeTimer); hide() })
 </script>
 
 <template>
@@ -83,9 +85,7 @@ onBeforeUnmount(() => {
       <div v-if="expanded" :id="tooltipId" class="contract-summary__bubble" role="region" aria-label="合同摘要" @mouseenter="show" :aria-busy="loading">
         <h3>合同摘要</h3>
         <Transition name="summary-content" mode="out-in" appear>
-          <div v-if="loading" key="loading" class="contract-summary__loading" role="status" aria-label="正在加载摘要">
-            <span class="contract-summary__spinner" aria-hidden="true"></span>
-          </div>
+          <CenteredLoading v-if="loading" key="loading" class="contract-summary__loading" label="正在加载摘要" />
           <div v-else-if="error" key="error">
             <p role="alert">{{ error }}</p>
             <button class="contract-summary__retry" type="button" @click="load">重新加载</button>
@@ -110,9 +110,7 @@ onBeforeUnmount(() => {
 .contract-summary__bubble::after { content: ''; position: absolute; top: -5px; left: 14px; width: 9px; height: 9px; transform: rotate(45deg); background: #f1f5fa; border-top: 1px solid #ffffffc4; border-left: 1px solid #ffffffc4; }
 .contract-summary__bubble h3 { margin: 0 0 12px; font-size: 14px; font-weight: 600; }
 .contract-summary__bubble p { margin: 0; max-height: min(300px, calc(100dvh - 276px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.9; }
-.contract-summary__loading { display: grid; place-items: center; min-height: 72px; }
-.contract-summary__spinner { width: 25px; height: 25px; box-sizing: border-box; border: 2px solid #7f9cbf30; border-top-color: #6687ae; border-right-color: #6687ae; border-radius: 50%; animation: summary-loading-spin .85s linear infinite; }
-@keyframes summary-loading-spin { to { transform: rotate(360deg); } }
+.contract-summary__loading { --loading-min-height: 72px; --loading-size: 25px; --loading-track: #7f9cbf30; --loading-color: #6687ae; }
 .summary-content-enter-active { transition: opacity .55s ease, transform .55s cubic-bezier(.22, 1, .36, 1); }
 .summary-content-leave-active { transition: opacity .16s ease; }
 .summary-content-enter-from { opacity: 0; transform: translateY(7px); }
@@ -121,5 +119,5 @@ onBeforeUnmount(() => {
 .contract-summary__retry:focus-visible { outline: 2px solid #829fbe; outline-offset: 2px; }
 .summary-bubble-enter-active, .summary-bubble-leave-active { transition: opacity .18s ease, transform .2s ease; }
 .summary-bubble-enter-from, .summary-bubble-leave-to { opacity: 0; transform: translateY(5px); }
-@media (prefers-reduced-motion: reduce) { .contract-summary__trigger, .summary-bubble-enter-active, .summary-bubble-leave-active, .summary-content-enter-active, .summary-content-leave-active { transition: none; } .contract-summary__spinner { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .contract-summary__trigger, .summary-bubble-enter-active, .summary-bubble-leave-active, .summary-content-enter-active, .summary-content-leave-active { transition: none; } }
 </style>

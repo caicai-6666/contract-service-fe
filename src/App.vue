@@ -1,26 +1,27 @@
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ContractIngestionView from './components/ContractIngestionView.vue'
 import ContractLibraryView from './components/ContractLibraryView.vue'
 import ContractNetworkView from './components/ContractNetworkView.vue'
-import LoginCard from './components/LoginCard.vue'
+import AuthenticationStatus from './components/AuthenticationStatus.vue'
 import MolecularFieldBackground from './components/MolecularFieldBackground.vue'
 import ReviewLogDialog from './components/ReviewLogDialog.vue'
 import logoUrl from './assets/logo.webp'
 import mailboxUrl from './assets/mailbox.webp'
 import {
+  ACCESS_TOKEN_STORAGE_KEY,
   AUTH_EXPIRED_EVENT,
+  ACCESS_DENIED_EVENT,
+  KNOWLEDGE_ENTRY_PATH,
   clearAuthSession,
-  getAuthSession,
-  loginWithSecretKey,
+  getAccessToken,
+  fetchCurrentUser,
 } from './services/contractApi.js'
 
-const initialAuthSession = getAuthSession()
-const loginState = ref(initialAuthSession ? 'success' : 'idle')
+const loginState = ref('loading')
 const loginError = ref('')
-const loginNotice = ref('')
-const authSession = ref(initialAuthSession)
+const authSession = ref(null)
 const visualEffectsPaused = ref(false)
 const reviewLogOpen = ref(false)
 const route = useRoute()
@@ -34,53 +35,57 @@ const workspaceSections = [
 const activeSection = computed(() => Number(route.meta.sectionIndex) || 0)
 
 let loginRequestController = null
+let activeToken = null
 
-async function login(secretKey) {
-  if (loginState.value === 'loading') return
-
-  loginState.value = 'loading'
-  loginError.value = ''
-  loginNotice.value = ''
-  loginRequestController?.abort()
-  const requestController = new AbortController()
-  loginRequestController = requestController
-
-  try {
-    authSession.value = await loginWithSecretKey(secretKey, {
-      signal: requestController.signal,
-    })
-    loginState.value = 'success'
-  } catch (error) {
-    if (error?.name === 'AbortError') return
-    loginState.value = 'error'
-    loginError.value = error instanceof TypeError
-      ? '无法连接登录服务，请稍后重试'
-      : error?.message || '登录失败，请稍后重试'
-  } finally {
-    if (loginRequestController === requestController) loginRequestController = null
-  }
-}
-
-function clearLoginMessage() {
-  loginError.value = ''
-  loginNotice.value = ''
-}
-
-function logout({ expired = false } = {}) {
-  reviewLogOpen.value = false
+function resetWorkspace(state) {
   loginRequestController?.abort()
   loginRequestController = null
   clearAuthSession()
   authSession.value = null
-  loginState.value = 'idle'
-  loginError.value = ''
-  loginNotice.value = expired ? '登录状态已失效，请重新登录' : ''
-  router.replace('/library')
+  reviewLogOpen.value = false
   visualEffectsPaused.value = false
+  loginError.value = ''
+  loginState.value = state
+}
+
+async function authenticate() {
+  activeToken = getAccessToken()
+  resetWorkspace(activeToken ? 'loading' : 'missing')
+  if (!activeToken) return
+
+  const controller = new AbortController()
+  loginRequestController = controller
+  try {
+    const session = await fetchCurrentUser({ signal: controller.signal })
+    if (loginRequestController !== controller) return
+    authSession.value = session
+    loginState.value = 'success'
+  } catch (error) {
+    if (loginRequestController !== controller) return
+    if (error?.name === 'AbortError') {
+      if (!controller.signal.aborted) void authenticate()
+      return
+    }
+    loginState.value = error?.status === 401 ? 'expired' : error?.status === 403 ? 'denied' : 'error'
+    loginError.value = error instanceof TypeError
+      ? '无法连接用户服务，请稍后重试。'
+      : error?.message || '用户服务暂时不可用，请稍后重试。'
+  } finally {
+    if (loginRequestController === controller) loginRequestController = null
+  }
 }
 
 function handleAuthExpired() {
-  logout({ expired: true })
+  resetWorkspace(getAccessToken() ? 'expired' : 'missing')
+}
+
+function handleAccessDenied() {
+  resetWorkspace('denied')
+}
+
+function handleTokenChange(event) {
+  if (event?.type === 'storage' && event.key !== ACCESS_TOKEN_STORAGE_KEY && event.key !== null) return
+  if (getAccessToken() !== activeToken) void authenticate()
 }
 
 function setVisualEffectsPaused(paused) {
@@ -98,10 +103,17 @@ watch(() => route.fullPath, () => {
 })
 
 window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
+window.addEventListener(ACCESS_DENIED_EVENT, handleAccessDenied)
+window.addEventListener('storage', handleTokenChange)
+window.addEventListener('focus', handleTokenChange)
+onMounted(authenticate)
 
 onBeforeUnmount(() => {
   loginRequestController?.abort()
   window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
+  window.removeEventListener(ACCESS_DENIED_EVENT, handleAccessDenied)
+  window.removeEventListener('storage', handleTokenChange)
+  window.removeEventListener('focus', handleTokenChange)
 })
 </script>
 
@@ -110,18 +122,13 @@ onBeforeUnmount(() => {
     <MolecularFieldBackground :paused="visualEffectsPaused" />
 
     <section v-if="loginState !== 'success'" class="welcome-page__stage">
-      <LoginCard
-        :loading="loginState === 'loading'"
-        :error="loginError"
-        :notice="loginNotice"
-        @input="clearLoginMessage"
-        @submit="login"
-      />
+      <AuthenticationStatus :state="loginState" :error="loginError" @retry="authenticate" />
     </section>
 
-    <Transition name="workspace-enter" appear>
+    <Transition name="workspace-enter" appear :css="loginState === 'success'">
       <section
         v-if="loginState === 'success'"
+        :key="authSession.userId"
         class="prototype-workspace"
         aria-labelledby="workspace-title"
         data-molecular-field-block
@@ -168,17 +175,16 @@ onBeforeUnmount(() => {
             >
               <img :src="mailboxUrl" alt="" draggable="false" />
             </button>
-            <button
-              type="button"
-              class="prototype-workspace__logout"
-              aria-label="退出登录"
-              title="退出登录"
-              @click="logout"
+            <a
+              :href="KNOWLEDGE_ENTRY_PATH"
+              class="prototype-workspace__return"
+              aria-label="返回知识沉淀"
+              title="返回知识沉淀"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M9 7 4 12l5 5M4 12h11M14 5h4a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-4" />
               </svg>
-            </button>
+            </a>
           </div>
         </header>
 

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, useId, watch } from 'vue'
 
 const props = defineProps({ text: { type: String, required: true }, lines: { type: Number, default: 1 }, maxCharacters: { type: Number, default: 0 } })
 const displayText = computed(() => {
@@ -65,18 +65,22 @@ function handleScroll(event) {
   if (!bubble.value?.contains(event.target)) hide()
 }
 watch(() => [props.text, props.maxCharacters], async () => { await nextTick(); measure() })
-onMounted(() => {
-  observer = new ResizeObserver(measure)
+function resume() {
+  observer ||= new ResizeObserver(measure)
   observer.observe(textElement.value)
   window.addEventListener('scroll', handleScroll, true)
   window.addEventListener('resize', hide)
-})
-onBeforeUnmount(() => {
-  clearTimeout(hideTimer)
+}
+function pause() {
+  hide()
   observer?.disconnect()
   window.removeEventListener('scroll', handleScroll, true)
   window.removeEventListener('resize', hide)
-})
+}
+onMounted(resume)
+onActivated(resume)
+onDeactivated(pause)
+onBeforeUnmount(pause)
 </script>
 
 <template>

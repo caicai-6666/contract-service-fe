@@ -27,6 +27,11 @@ body {
   overflow: hidden;
 }
 
+.content-state-enter-active { transition: opacity .4s ease; }
+.content-state-leave-active { transition: opacity .22s ease; pointer-events: none; }
+.content-state-enter-from, .content-state-leave-to { opacity: 0; }
+@media (prefers-reduced-motion: reduce) { .content-state-enter-active, .content-state-leave-active { transition: none; } }
+
 button,
 input {
   font: inherit;
@@ -253,7 +258,7 @@ input {
   white-space: nowrap;
 }
 
-.prototype-workspace__logout {
+.prototype-workspace__return {
   display: grid;
   place-items: center;
   width: 45px;
@@ -288,17 +293,17 @@ input {
 .prototype-workspace__mailbox:active { transform: translateY(0); }
 .prototype-workspace__mailbox:focus-visible { outline: 3px solid #7063d857; outline-offset: 3px; }
 
-.prototype-workspace__logout:hover {
+.prototype-workspace__return:hover {
   transform: translateY(-2px);
   box-shadow: 0 12px 25px #1f3b304d;
 }
 
-.prototype-workspace__logout:focus-visible {
+.prototype-workspace__return:focus-visible {
   outline: 3px solid #7063d857;
   outline-offset: 3px;
 }
 
-.prototype-workspace__logout svg {
+.prototype-workspace__return svg {
   width: 19px;
   height: 19px;
   fill: none;

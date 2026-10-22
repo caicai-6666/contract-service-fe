@@ -184,7 +184,7 @@ onBeforeUnmount(() => {
         </li>
       </ul>
       <p v-if="error" class="batch-error" role="alert">{{ error }}</p>
-      <p v-if="running" class="batch-note">关闭面板后继续提交；请勿刷新页面或退出登录。</p>
+      <p v-if="running" class="batch-note">关闭面板后继续提交；请勿刷新或离开页面。</p>
       <footer><span>{{ completed }} / {{ items.length }} 已创建</span><div><button v-if="items.length && !running" type="button" @click="fileInput.click()">重新选择</button><button v-if="completed || items.some(item => item.status === 'uncertain')" type="button" @click="tasks">处理任务</button><button class="batch-submit" type="button" :disabled="running || !queued" @click="start">{{ running ? '正在提交…' : '开始批量提取' }}</button></div></footer>
       </div>
       </div>

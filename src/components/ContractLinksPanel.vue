@@ -1,5 +1,8 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
+import CenteredLoading from './CenteredLoading.vue'
+import EmptyState from './EmptyState.vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, useId, watch } from 'vue'
+import { contractDataRevision } from '../services/contractDataRevision.js'
 import { getContractRelations } from '../services/contractNetworkApi.js'
 import { getContractDocuments } from '../services/contractLibraryApi.js'
 import { createContractRelation, deleteContractRelation } from '../services/contractRelationsApi.js'
@@ -18,12 +21,15 @@ const busy = computed(() => saving.value || deleting.value)
 const descriptionLength = computed(() => Array.from(description.value.trim()).length)
 let listController
 let disposed = false
-watch(busy, value => emit('saving-change', value), { flush: 'sync' })
+let active = true
+let loadedRevision = contractDataRevision.value
+watch(busy, value => { if (active) emit('saving-change', value) }, { flush: 'sync' })
 async function loadLinks() {
   if (busy.value) return
   closeSearch()
   listController?.abort()
   const request = new AbortController()
+  const revision = contractDataRevision.value
   listController = request
   loading.value = true; loadError.value = ''
   try {
@@ -38,6 +44,7 @@ async function loadLinks() {
     }
     availableDocuments.value = documents
     links.value = records.map(record => ({ ...record, file_name: documents.find(document => document.id === record.document_id).name }))
+    loadedRevision = revision
   } catch (error) {
     if (!disposed && request === listController && error.name !== 'AbortError') loadError.value = error.message || '关联加载失败，请重试'
   } finally {
@@ -100,6 +107,23 @@ async function searchKeydown(event) {
 function onScroll(event) { if (!searchResults.value?.contains(event.target)) closeSearch() }
 window.addEventListener('scroll', onScroll, true)
 window.addEventListener('resize', closeSearch)
+onActivated(() => {
+  active = true
+  emit('saving-change', busy.value)
+  window.addEventListener('scroll', onScroll, true)
+  window.addEventListener('resize', closeSearch)
+  if (loadedRevision !== contractDataRevision.value && !loading.value && !busy.value) void loadLinks()
+})
+onDeactivated(() => {
+  active = false
+  closeSearch()
+  dialog.value?.close()
+  deleteTarget.value = null
+  deleteTrigger = null
+  window.removeEventListener('scroll', onScroll, true)
+  window.removeEventListener('resize', closeSearch)
+  emit('saving-change', false)
+})
 onBeforeUnmount(() => { disposed = true; listController?.abort(); emit('saving-change', false); closeSearch(); window.removeEventListener('scroll', onScroll, true); window.removeEventListener('resize', closeSearch) })
 const selectedId = ref('')
 const description = ref('')
@@ -141,6 +165,7 @@ async function add() {
     if (disposed) return
     links.value = [{ ...record, document_id: target.id, file_name: target.name }, ...links.value]
       .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || a.relation_id.localeCompare(b.relation_id))
+    loadedRevision = contractDataRevision.value
     saving.value = false
     cancelAdding()
   } catch (error) {
@@ -155,12 +180,14 @@ async function requestDelete(link, event) {
 function cancelDelete() { if (busy.value) return; dialog.value?.close(); deleteTarget.value = null; deleteTrigger?.focus() }
 async function remove() {
   if (busy.value || !deleteTarget.value) return
+  const target = deleteTarget.value
   deleting.value = true; deleteError.value = ''
   try {
-    await deleteContractRelation(deleteTarget.value.relation_id)
+    await deleteContractRelation(target.relation_id)
     if (disposed) return
-    links.value = links.value.filter(link => link.relation_id !== deleteTarget.value.relation_id)
-    dialog.value?.close(); deleteTarget.value = null; panel.value?.focus()
+    links.value = links.value.filter(link => link.relation_id !== target.relation_id)
+    loadedRevision = contractDataRevision.value
+    dialog.value?.close(); deleteTarget.value = null; if (active) panel.value?.focus()
   } catch (error) {
     if (!disposed) deleteError.value = error.message || '删除失败，请重试'
   } finally { deleting.value = false }
@@ -183,9 +210,10 @@ function escape(event) {
       <div class="contract-links__header-actions"><button v-if="!editing" type="button" aria-label="新增关联" title="新增关联" :disabled="loading || !!loadError || busy" @click="startAdding">＋</button><button type="button" aria-label="收起合同关联" title="收起合同关联" :disabled="busy" @click="$emit('close')">×</button></div>
     </header>
     <div class="contract-links__body">
-      <p v-if="loading" class="contract-links__empty" role="status"><i class="contract-links__spinner"></i> 正在加载关联…</p>
+      <Transition name="content-state" mode="out-in" appear>
+      <CenteredLoading v-if="loading" key="loading" label="正在加载合同关联" />
       <p v-else-if="loadError" class="contract-links__error" role="alert">{{ loadError }} <button type="button" @click="loadLinks">重试</button></p>
-      <p v-else-if="!links.length" class="contract-links__empty">暂无关联，点击右上角“＋”添加。</p>
+      <EmptyState v-else-if="!links.length" key="empty" />
       <ol v-else>
         <li v-for="(link, index) in links" :key="link.relation_id">
           <span class="contract-links__number">{{ String(index + 1).padStart(2, '0') }}</span>
@@ -202,6 +230,7 @@ function escape(event) {
           </div>
         </li>
       </ol>
+      </Transition>
     </div>
     <div class="contract-links__reveal" :class="{ 'is-expanded': editing }" :inert="!editing" :aria-hidden="!editing">
       <div class="contract-links__clip">
@@ -258,7 +287,6 @@ function escape(event) {
 .contract-links .contract-links__delete { display: flex; flex-shrink: 0; margin: 0 0 0 auto; padding: 5px; border: 0; background: transparent; color: #8c9690; }
 .contract-links__delete svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
 .contract-links .contract-links__delete:hover { color: #aa4752; background: #f2e3e4; }
-.contract-links__empty { padding: 16px 0; font-size: 12px; color: #7d897e; }
 .contract-links__reveal { flex-shrink: 0; display: grid; grid-template-rows: 0fr; opacity: 0; margin: 0 20px; transition: grid-template-rows .32s cubic-bezier(.22,1,.36,1), opacity .2s; }
 .contract-links__reveal.is-expanded { grid-template-rows: 1fr; opacity: 1; }
 .contract-links__clip { min-height: 0; overflow: hidden; }

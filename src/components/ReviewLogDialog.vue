@@ -1,18 +1,23 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, reactive, ref, watch } from 'vue'
 import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
+import FileLevelHistoryList from './FileLevelHistoryList.vue'
+import CenteredLoading from './CenteredLoading.vue'
+import EmptyState from './EmptyState.vue'
+import { getFileLevelHistory } from '../services/fileLevelHistoryApi.js'
 import { createContractPdfCache } from '../models/contractPdfCache.js'
 import { getDeletionReviewIds, getDeletionReviewDetail, getDeletionReviewPdf } from '../services/deletionReviewsApi.js'
 import { deletionLabels } from '../models/deletionReviews.js'
 import { getPendingReviewIds, getPendingReviewDetail, getPendingReviewPdf } from '../services/pendingReviewsApi.js'
 import { getAuthSession } from '../services/contractApi.js'
+import { reviewDataRevision } from '../services/contractDataRevision.js'
 import { deliveryLabels, reviewLabels, ingestionLabels, cleanupRemainingSeconds, formatRetention, formatReviewTime } from '../models/pendingReviews.js'
 
 const props = defineProps({ open: Boolean })
 const emit = defineEmits(['close'])
 const dialog = ref(null), listElement = ref(null)
 const reviewKind = ref('ingestion')
-const reviewStates = reactive(Object.fromEntries(['ingestion', 'deletion'].map(kind => [kind, {
+const reviewStates = reactive(Object.fromEntries(['ingestion', 'deletion', 'changes'].map(kind => [kind, {
   rows: [], selectedId: '', loading: false, listError: '', removedCount: 0, loaded: false, scrollTop: 0,
 }])))
 function bindReviewState(field) {
@@ -93,7 +98,7 @@ function closePdf() {
   pdfUrl.value = ''
 }
 async function previewPdf({ reload = false } = {}) {
-  if (!detail.value || (reviewKind.value === 'deletion' && detail.value.pdf.url === null)) return
+  if (reviewKind.value === 'changes' || !detail.value || (reviewKind.value === 'deletion' && detail.value.pdf.url === null)) return
   closePdf()
   const snapshot = detail.value
   const kind = reviewKind.value
@@ -142,11 +147,21 @@ async function loadRow(row, controller = request) {
   } finally { row.loading = false }
   return true
 }
+async function refreshHistory(controller) {
+  const records = await getFileLevelHistory({ signal: controller.signal })
+  if (request !== controller || controller.signal.aborted) return
+  rows.value = records.map(detail => ({ id: detail.id, detail }))
+  reviewStates.changes.loaded = true
+}
 async function refresh() {
   request?.abort()
   const controller = new AbortController()
   request = controller; loading.value = true; listError.value = ''; removedCount.value = 0
   try {
+    if (reviewKind.value === 'changes') {
+      await refreshHistory(controller)
+      return
+    }
     const ids = await activeReviewApi.value.list({ signal: controller.signal })
     if (request !== controller) return
     const retained = new Set(ids.map(pdfCacheKey))
@@ -185,7 +200,12 @@ function stop() {
   clearInterval(timer); timer = null
   closePdf()
 }
+function saveReviewScroll() {
+  const kind = listElement.value?.dataset.reviewKind
+  if (kind) reviewStates[kind].scrollTop = listElement.value.scrollTop
+}
 function startClock() {
+  if (reviewKind.value === 'changes') return
   clock.value = performance.now()
   timer = setInterval(() => { clock.value = performance.now() }, 1000)
 }
@@ -206,14 +226,21 @@ function restoreReviewScroll(element) {
 }
 watch(() => props.open, async open => {
   if (open) {
-    reviewKind.value = 'ingestion'
     await nextTick()
     if (!props.open || !dialog.value) return
     if (!dialog.value.open) dialog.value.showModal()
     startClock()
-    void refresh()
-  } else { stop(); dialog.value?.close() }
+    if (listElement.value) listElement.value.scrollTop = reviewStates[reviewKind.value].scrollTop
+    if (!reviewStates[reviewKind.value].loaded) void refresh()
+    else request = new AbortController()
+  } else { saveReviewScroll(); stop(); dialog.value?.close() }
 }, { flush: 'post' })
+watch(reviewDataRevision, (value, previous) => {
+  for (const kind of ['ingestion', 'deletion']) {
+    if (value[kind] !== previous[kind]) reviewStates[kind].loaded = false
+  }
+  if (props.open && !reviewStates[reviewKind.value].loaded) void refresh()
+})
 onBeforeUnmount(() => {
   stop(); dialog.value?.close()
   pdfCache.clear()
@@ -239,6 +266,7 @@ onBeforeUnmount(() => {
           <div class="review-log__filters" role="group" aria-label="审核类型">
             <button type="button" :class="{ 'is-active': reviewKind === 'ingestion' }" :aria-pressed="reviewKind === 'ingestion'" @click="selectReviewKind('ingestion')">入库审核</button>
             <button type="button" :class="{ 'is-active': reviewKind === 'deletion' }" :aria-pressed="reviewKind === 'deletion'" @click="selectReviewKind('deletion')">删除审核</button>
+            <button type="button" :class="{ 'is-active': reviewKind === 'changes' }" :aria-pressed="reviewKind === 'changes'" @click="selectReviewKind('changes')">变更记录</button>
           </div>
           <div class="review-log__actions">
             <button type="button" :disabled="loading || refreshSpinning" :aria-busy="loading" aria-label="刷新审核日志" :title="loading ? '正在刷新' : '刷新审核日志'" @click="refresh">
@@ -253,15 +281,20 @@ onBeforeUnmount(() => {
           <div :key="reviewKind" class="review-log__pane">
             <p v-if="listError" class="review-log__error selectable-content" role="alert">{{ listError }}{{ rows.length ? '（保留上次读取的记录）' : '' }} <button @click="refresh" :disabled="loading">重试</button></p>
             <p v-if="removedCount" class="review-log__notice" role="status">{{ removedCount }} 条记录已不再可用，已从列表移除。</p>
-            <div class="review-log__body">
-              <nav ref="listElement" :data-review-kind="reviewKind" class="review-log__list" :aria-label="reviewKind === 'deletion' ? '删除申请' : '入库申请'" :aria-busy="loading">
+            <div v-if="reviewKind === 'changes'" ref="listElement" data-review-kind="changes" class="review-log__list review-log__history">
+              <FileLevelHistoryList :records="visibleRows.map(row => row.detail)" :enter-delays="rowEnterDelays" :loading="loading" :failed="Boolean(listError)" />
+            </div>
+            <div v-else class="review-log__body">
+              <nav ref="listElement" :data-review-kind="reviewKind" class="review-log__list" :class="{ 'review-log__list--empty': !visibleRows.length }" :aria-label="reviewKind === 'deletion' ? '删除申请' : '入库申请'" :aria-busy="loading">
                 <div v-if="reviewKind === 'ingestion'" class="review-log__scope" role="group" aria-label="入库申请筛选">
                   <button type="button" :class="{ 'is-active': !onlyMyIngestionReviews }" :aria-pressed="!onlyMyIngestionReviews" @click="onlyMyIngestionReviews = false">全部</button>
                   <button type="button" :class="{ 'is-active': onlyMyIngestionReviews }" :aria-pressed="onlyMyIngestionReviews" @click="onlyMyIngestionReviews = true">我提交的</button>
                 </div>
-                <TransitionGroup v-if="open" name="review-log-row" tag="div" class="review-log__rows" appear @before-leave="fixLeavingRow" @after-leave="resetLeavingRow" @leave-cancelled="resetLeavingRow">
+                <TransitionGroup name="review-log-row" tag="div" class="review-log__rows" appear @before-leave="fixLeavingRow" @after-leave="resetLeavingRow" @leave-cancelled="resetLeavingRow">
                   <button v-for="row in visibleRows" :key="`${reviewKind}:${row.id}`" type="button" class="review-log__item" :style="{ '--row-enter-delay': `${rowEnterDelays.get(row.id) ?? row.enterDelay ?? 0}ms` }" :class="{ 'is-selected': selectedId === row.id }" :aria-pressed="selectedId === row.id" @click="selectedId = row.id">
-                    <strong>{{ row.detail?.file_name || (row.error ? '详情读取失败' : '正在读取申请…') }}</strong>
+                    <strong v-if="row.detail">{{ row.detail.file_name }}</strong>
+                    <CenteredLoading v-else-if="row.loading" class="review-log__item-loading" label="正在读取申请详情" />
+                    <strong v-else>详情读取失败</strong>
                     <span v-if="row.detail" class="review-log__item-meta">{{ reviewKind === 'deletion' ? row.detail.requested_by : row.detail.submitted_by }} · {{ formatReviewTime(row.detail.created_at) }}</span>
                     <span v-if="row.detail" class="review-log__item-footer">
                       <span class="review-log__badge" :class="`is-${row.detail.review.status}`">{{ reviewLabels[row.detail.review.status] }}</span>
@@ -270,14 +303,17 @@ onBeforeUnmount(() => {
                     <span v-if="row.error" class="review-log__item-error">读取失败，点击查看</span>
                   </button>
                 </TransitionGroup>
-                <Transition name="review-log-empty">
-                  <p v-if="!visibleRows.length" class="review-log__empty">{{ loading ? '正在读取审核日志…' : listError ? '审核列表暂时不可用' : reviewKind === 'ingestion' && onlyMyIngestionReviews ? '暂无我提交的入库审核记录' : '暂无保留的审核记录' }}</p>
+                <Transition name="content-state" mode="out-in" appear>
+                  <CenteredLoading v-if="!visibleRows.length && loading" key="loading" label="正在读取审核日志" />
+                  <p v-else-if="!visibleRows.length && listError" key="error" class="review-log__empty" role="status">审核列表暂时不可用</p>
+                  <EmptyState v-else-if="!visibleRows.length" key="empty" />
                 </Transition>
               </nav>
               <section class="review-log__detail" aria-label="审核详情">
                 <Transition name="review-log-detail" mode="out-in" @before-leave="element => { element.inert = true }" @enter="enterDetail">
                   <div :key="detailKey" class="review-log__detail-body">
                     <p v-if="selected?.error" class="review-log__error" role="alert">{{ selected.error }} <button :disabled="loading || selected.loading" @click="loadRow(selected)">重试详情</button></p>
+                    <Transition name="content-state" mode="out-in" appear>
                     <div v-if="detail" class="review-log__content">
                       <header class="review-log__document"><div><h3>{{ detail.file_name }}</h3><span><template v-if="reviewKind === 'ingestion'">{{ detail.page_count }} 页 · </template>{{ formatReviewTime(detail.created_at) }} 提交</span></div><button type="button" :disabled="reviewKind === 'deletion' && detail.pdf.url === null" :title="reviewKind === 'deletion' && detail.pdf.url === null ? '原合同 PDF 已不可用' : '查看 PDF'" @click="previewPdf">{{ reviewKind === 'deletion' && detail.pdf.url === null ? 'PDF 不可用' : '查看 PDF' }}</button></header>
                       <div class="review-log__stages">
@@ -287,12 +323,16 @@ onBeforeUnmount(() => {
                         <div v-else><span>实际删除</span><strong :class="{ 'is-rejected': detail.deletion.status === 'failed', 'is-approved': detail.deletion.status === 'succeeded' }">{{ detail.review.status === 'rejected' && detail.deletion.status === 'pending' ? '不删除' : deletionLabels[detail.deletion.status] }}</strong></div>
                       </div>
                       <section v-if="reviewKind === 'deletion'" class="review-log__block"><h4>原合同信息</h4><dl><div><dt>上传人</dt><dd>{{ detail.uploader }}</dd></div><div><dt>原入库时间</dt><dd>{{ formatReviewTime(detail.contract_ingested_at) }}</dd></div></dl></section>
+                      <section class="review-log__block"><h4>文件等级</h4><p>{{ detail.file_level === null ? '暂无文件等级' : String(detail.file_level) }}</p></section>
                       <section class="review-log__block"><h4>合同摘要</h4><p>{{ detail.summary ?? '尚未保存摘要' }}</p></section>
                       <section class="review-log__block"><h4>{{ reviewKind === 'deletion' ? '删除申请备注' : '入库员备注' }} <small>{{ reviewKind === 'deletion' ? detail.requested_by : detail.submitted_by }}</small></h4><p>{{ detail.note || '未填写备注' }}</p></section>
                       <section class="review-log__block"><h4>审核反馈</h4><p>{{ detail.review.note === null ? '暂无审核备注' : detail.review.note || '审核人未填写备注' }}</p><dl><div><dt>审核人</dt><dd>{{ detail.review.reviewer ?? '—' }}</dd></div><div><dt>审核时间</dt><dd>{{ formatReviewTime(detail.review.reviewed_at) }}</dd></div><div v-if="reviewKind === 'ingestion'"><dt>正式入库时间</dt><dd>{{ formatReviewTime(detail.ingestion.ingested_at) }}</dd></div><div v-else><dt>删除完成时间</dt><dd>{{ formatReviewTime(detail.deletion.completed_at) }}</dd></div></dl></section>
                       <dl class="review-log__identifiers"><div><dt>申请编号</dt><dd>{{ detail.submission_id }}</dd></div><div><dt>最近更新</dt><dd>{{ formatReviewTime(detail.updated_at) }}</dd></div></dl>
                     </div>
-                    <p v-else class="review-log__empty" role="status">{{ selected?.loading ? '正在读取申请详情…' : selected?.error ? '详情暂时不可用' : '选择一条记录查看审核详情' }}</p>
+                    <CenteredLoading v-else-if="selected?.loading || (loading && !visibleRows.length)" label="正在读取申请详情" />
+                    <p v-else-if="selected?.error || listError" class="review-log__empty" role="status">详情暂时不可用</p>
+                    <EmptyState v-else variant="detail" />
+                    </Transition>
                   </div>
                 </Transition>
               </section>
@@ -346,6 +386,11 @@ onBeforeUnmount(() => {
 .review-log__actions button:disabled { opacity: .7; }
 .review-log__actions svg { display: block; width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; transform-origin: center; }
 .review-log__pane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.review-log__history { flex: 1; min-height: 0; padding: 20px 28px; border-right: 0; }
+.review-log__list--empty { display: flex; flex-direction: column; }
+.review-log__list--empty .review-log__scope { flex: none; }
+.review-log__detail-body { display: flex; flex-direction: column; min-height: 100%; }
+.review-log__item-loading { --loading-min-height: 20px; --loading-size: 16px; }
 .review-log-content-enter-active { transition: opacity .36s cubic-bezier(.22, 1, .36, 1); }
 .review-log-content-leave-active { transition: opacity .24s ease; pointer-events: none; }
 .review-log-content-enter-from, .review-log-content-leave-to { opacity: 0; }
@@ -381,5 +426,6 @@ onBeforeUnmount(() => {
 .review-log__empty { padding: 36px 12px; color: #8c9c90; text-align: center; font-size: 12px; line-height: 1.8; }.review-log__error { margin: 12px 20px; color: #a55c4e; font-size: 12px; line-height: 1.8; }.review-log__notice { margin: 10px 24px 0; color: #7b8e81; font-size: 11px; }
 .is-spinning { animation: review-log-spin .8s linear infinite; } @keyframes review-log-spin { to { transform: rotate(360deg); } }
 @media (max-width: 700px) { .review-log { width: calc(100vw - 20px); height: calc(100dvh - 24px); border-radius: 16px; }.review-log__header { padding: 18px; flex-wrap: wrap; }.review-log__filters { order: 3; width: 100%; }.review-log__filters button { flex: 1; }.review-log__body { grid-template-columns: 1fr; grid-template-rows: 180px minmax(0, 1fr); }.review-log__list { border-right: 0; border-bottom: 1px solid #668b701f; }.review-log__detail { padding: 20px 16px; } }
+@media (max-width: 700px) { .review-log__body .review-log__list { --empty-min-height: 0px; --empty-padding: 10px; --empty-image-size: 56px; } }
 @media (prefers-reduced-motion: reduce) { .is-spinning, .review-log-row-enter-active { animation: none; }.review-log__item, .review-log__actions button, .review-log-count-enter-active, .review-log-count-leave-active, .review-log-row-move, .review-log-row-leave-active, .review-log-content-enter-active, .review-log-content-leave-active, .review-log-detail-enter-active, .review-log-detail-leave-active, .review-log-empty-enter-active, .review-log-empty-leave-active { transition: none; } }
 </style>

@@ -1,4 +1,5 @@
 <script setup>
+import CenteredLoading from './CenteredLoading.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { getContractNetwork, getNetworkDocuments, getContractRelations } from '../services/contractNetworkApi.js'
 import ContractSummaryDetail from './ContractSummaryDetail.vue'
@@ -264,7 +265,7 @@ onBeforeUnmount(() => { disposed = true; relationCache.clear(); summaryCache.cle
           <input id="network-contract-search" v-model="query" autocomplete="off" aria-label="搜索合同名称" role="combobox" aria-autocomplete="list" :aria-expanded="searchOpen" aria-controls="network-search-results" :aria-activedescendant="searchOpen && highlighted >= 0 ? `network-option-${highlighted}` : undefined" :title="center?.file_name" placeholder="输入合同名称" @focus="searchOpen = true" @click="searchOpen = true" @blur="closeSearch" @input="searchOpen = true; highlighted = -1" @keydown="searchKeydown" />
           <button v-if="network || query || loading" class="network-clear" aria-label="清除选择并回到待机" title="回到待机" @pointerdown.prevent @click="reset">×</button>
           <div v-if="searchOpen" id="network-search-results" class="network-results" role="listbox" @pointerdown.prevent>
-            <p v-if="catalogLoading" role="status">正在加载合同列表…</p>
+            <CenteredLoading v-if="catalogLoading" label="正在加载合同列表" style="--loading-min-height: 64px; --loading-size: 20px" />
             <template v-else>
               <button v-for="(item, index) in results" :id="`network-option-${index}`" :key="item.document_id" type="button" role="option" :aria-selected="highlighted === index" tabindex="-1" @click="select(item.document_id)"><span>{{ item.file_name }}</span><small>{{ item.category }}</small></button>
               <p v-if="!results.length">{{ catalogError ? '合同列表加载失败' : networkContracts.length ? '未找到匹配的合同' : '暂无可选合同' }}</p>

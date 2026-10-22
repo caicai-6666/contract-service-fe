@@ -1,5 +1,7 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import CenteredLoading from './CenteredLoading.vue'
+import EmptyState from './EmptyState.vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import alertListIcon from '../assets/alert-list.webp'
 import TruncatedText from './TruncatedText.vue'
 import { CONTRACT_NOTE_MAX_LENGTH, normalizeContractNoteContent } from '../models/contractNotes.js'
@@ -19,6 +21,8 @@ const saving = ref(false)
 const confirming = ref(false)
 const deleting = ref(false)
 const busy = computed(() => saving.value || deleting.value)
+let active = true
+let needsReload = false
 const deleteTarget = ref(null)
 const deleteError = ref('')
 const deleteDialog = ref(null)
@@ -57,6 +61,7 @@ async function confirmDelete() {
     await nextTick()
     panel.value?.focus()
   } catch (cause) {
+    needsReload = true
     if (current === generation) deleteError.value = cause.message || '删除失败，请重试'
   } finally { deleting.value = false }
 }
@@ -66,7 +71,7 @@ watch(confirming, (value) => {
   if (value) confirmationTimer = window.setTimeout(() => { confirming.value = false }, 3000)
 }, { flush: 'sync' })
 watch(draft, () => { confirming.value = false }, { flush: 'sync' })
-watch(busy, (value) => emit('saving-change', value), { flush: 'sync' })
+watch(busy, (value) => { if (active) emit('saving-change', value) }, { flush: 'sync' })
 const saveError = ref('')
 const input = ref(null)
 const panel = ref(null)
@@ -84,7 +89,7 @@ async function load() {
   error.value = ''
   try {
     const result = await props.source.list(props.documentId, { signal: controller.signal })
-    if (current === generation) notes.value = result
+    if (current === generation) { notes.value = result; needsReload = false }
   } catch (cause) {
     if (cause.name === 'AbortError') return
     if (current === generation) error.value = cause.message || '注意事项加载失败，请重试'
@@ -104,6 +109,20 @@ watch(() => props.documentId, () => {
   void load()
 }, { immediate: true })
 onBeforeUnmount(() => { generation++; loadController?.abort(); window.clearTimeout(confirmationTimer); emit('saving-change', false) })
+onActivated(() => {
+  active = true
+  emit('saving-change', busy.value)
+  if (needsReload && !busy.value && !loading.value) void load()
+})
+onDeactivated(() => {
+  active = false
+  confirming.value = false
+  window.clearTimeout(confirmationTimer)
+  deleteDialog.value?.close()
+  deleteTarget.value = null
+  deleteTrigger = null
+  emit('saving-change', false)
+})
 
 async function startAdding() {
   if (props.disabled || busy.value || loading.value || error.value) return
@@ -145,6 +164,7 @@ async function save() {
     await nextTick()
     panel.value?.focus()
   } catch (cause) {
+    needsReload = true
     if (current === generation) saveError.value = cause.message || '新增结果未确认，请核对列表后再重试'
   } finally { saving.value = false }
 }
@@ -164,9 +184,10 @@ function formatTime(value) {
     </header>
     <p class="contract-notes__intro">人工补充意见，非合同原文或已核实事实。</p>
     <div class="contract-notes__body" :aria-busy="loading">
-      <p v-if="loading" class="contract-notes__empty" role="status">正在加载注意事项…</p>
+      <Transition name="content-state" mode="out-in" appear>
+      <CenteredLoading v-if="loading" key="loading" label="正在加载注意事项" />
       <div v-else-if="error" class="contract-notes__empty" role="alert">{{ error }}<button type="button" @click="load">重新加载</button></div>
-      <p v-else-if="!notes.length" class="contract-notes__empty">暂无注意事项，点击右上角“＋”添加。</p>
+      <EmptyState v-else-if="!notes.length" key="empty" />
       <ol v-else class="contract-notes__list">
         <li v-for="(note, index) in notes" :key="note.note_id" class="contract-notes__item">
           <span class="contract-notes__number">{{ String(index + 1).padStart(2, '0') }}</span>
@@ -184,6 +205,7 @@ function formatTime(value) {
           </div>
         </li>
       </ol>
+      </Transition>
     </div>
       <div
         class="contract-notes__editor-reveal"

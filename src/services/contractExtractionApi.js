@@ -1,5 +1,6 @@
 import { modelCoreDefinitions } from '../models/coreDefinitions.js'
 import { modelSubmissionReceipt } from '../models/contractSubmission.js'
+import { invalidateReviewData } from './contractDataRevision.js'
 import {
   CONTRACT_API_BASE_PATH,
   ContractApiError,
@@ -133,7 +134,7 @@ export async function ingestExtractionRun(runId, draft, { signal } = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(draft),
     signal,
-  })
+  }).finally(() => invalidateReviewData('ingestion'))
   const result = await requireJsonResponse(response, [201])
   return modelSubmissionReceipt(result)
 }

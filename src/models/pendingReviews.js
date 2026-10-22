@@ -1,4 +1,5 @@
 import { isContractPassports } from './contractPassports.js'
+import { isFileLevel } from './fileLevel.js'
 
 export const deliveryLabels = { pending: '待发送', publishing: '发送中', published: '已发送', uncertain: '发送结果待确认', blocked: '发送受阻' }
 export const reviewLabels = { pending_send: '尚未送审', pending_review: '等待审核', approved: '审核通过', rejected: '审核拒绝' }
@@ -29,6 +30,8 @@ export function modelReviewDetail(value, id) {
     || !Object.hasOwn(reviewLabels, value.review?.status)
     || !['note', 'reviewer'].every(key => nullableText(value.review[key])) || !nullableTime(value.review.reviewed_at)
     || !isContractPassports(value.review.passport)
+    || !isFileLevel(value.file_level) || !isFileLevel(value.review.file_level)
+    || String(value.file_level) !== String(value.review.file_level)
     || !Object.hasOwn(ingestionLabels, value.ingestion?.status) || !nullableTime(value.ingestion.ingested_at)
     || !value.cleanup || !nullableTime(value.cleanup.review_processed_at) || !nullableTime(value.cleanup.eligible_at)
     || typeof value.pdf?.relative_path !== 'string' || typeof value.pdf?.url !== 'string') return invalid()

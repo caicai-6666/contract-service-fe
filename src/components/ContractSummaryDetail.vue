@@ -1,4 +1,5 @@
 <script setup>
+import CenteredLoading from './CenteredLoading.vue'
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { getContractSummary } from '../services/contractSummaryApi.js'
 
@@ -37,7 +38,7 @@ onBeforeUnmount(() => controller?.abort())
 <template>
   <div class="contract-summary-detail" :aria-busy="loading">
     <Transition name="summary-detail" mode="out-in">
-      <div v-if="loading" key="loading" class="contract-summary-detail__loading" role="status" aria-label="正在加载合同摘要"><i aria-hidden="true"></i></div>
+      <CenteredLoading v-if="loading" key="loading" class="contract-summary-detail__loading" label="正在加载合同摘要" />
       <div v-else-if="error" key="error" class="contract-summary-detail__error" role="alert">{{ error }}<button type="button" @click="loadSummary">重试</button></div>
       <p v-else key="summary" :class="{ 'contract-summary-detail__empty': summary === null }">{{ summary === null ? '暂无摘要' : summary }}</p>
     </Transition>
@@ -48,13 +49,11 @@ onBeforeUnmount(() => controller?.abort())
 .contract-summary-detail { line-height: 1.9; overflow-wrap: anywhere; }
 .contract-summary-detail p { margin: 0; white-space: pre-wrap; }
 .contract-summary-detail__empty { color: #85968c; }
-.contract-summary-detail__loading { display: flex; align-items: center; min-height: 36px; }
-.contract-summary-detail__loading i { width: 15px; height: 15px; border: 1.5px solid #d5e3d9; border-top-color: #60806a; border-radius: 50%; animation: summary-detail-spin .8s linear infinite; }
+.contract-summary-detail__loading { --loading-min-height: 36px; --loading-size: 18px; }
 .contract-summary-detail__error { color: #a36353; }
 .contract-summary-detail__error button { margin-left: 8px; padding: 0; border: 0; background: transparent; color: #52705e; font: inherit; text-decoration: underline; cursor: pointer; }
 .summary-detail-enter-active { transition: opacity .45s ease-out; }
 .summary-detail-leave-active { transition: opacity .15s ease-in; }
 .summary-detail-enter-from, .summary-detail-leave-to { opacity: 0; }
-@keyframes summary-detail-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .summary-detail-enter-active, .summary-detail-leave-active { transition: none; }.contract-summary-detail__loading i { animation-duration: 1.6s; } }
+@media (prefers-reduced-motion: reduce) { .summary-detail-enter-active, .summary-detail-leave-active { transition: none; } }
 </style>

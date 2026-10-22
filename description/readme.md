@@ -12,7 +12,7 @@
 | --- | --- |
 | 了解前端项目定位、开发思想与边界 | [项目开发原则](project.md) |
 | 进行代码开发、修改或重构 | [`AGENTS.md`](../AGENTS.md) |
-| 了解审核用户登录、会话和接口鉴权 | [前端登录与鉴权](platform/authentication.md) |
+| 了解统一入口身份验证、会话和接口鉴权 | [前端登录与鉴权](platform/authentication.md) |
 | 了解页面路由、页面状态保留和部署回退要求 | [前端页面路由](platform/routing.md) |
 | 构建前端镜像、配置后端地址与容器运行 | [Docker 部署](platform/docker.md) |
 | 了解正式合同目录、筛选、PDF 预览和删除 | [合同库档案筛选](features/contract-library.md) |

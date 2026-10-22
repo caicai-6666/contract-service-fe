@@ -1,3 +1,4 @@
+import { parseFileLevelJson } from '../models/fileLevel.js'
 import { CONTRACT_API_BASE_PATH, contractApiFetch, ContractApiError } from './contractApi.js'
 import { isSubmissionId } from '../models/pendingReviews.js'
 import { modelDeletionReviewIds, modelDeletionReviewDetail } from '../models/deletionReviews.js'
@@ -6,7 +7,7 @@ import { getContractPdf } from './contractResourceApi.js'
 const base = `${CONTRACT_API_BASE_PATH}/deletion-reviews`
 async function read(path, signal) {
   const response = await contractApiFetch(path, { signal, cache: 'no-store' })
-  const payload = await response.json().catch(() => null)
+  const payload = await response.text().then(parseFileLevelJson).catch(() => null)
   if (!response.ok) throw new ContractApiError(typeof payload?.detail === 'string' ? payload.detail : `删除审核读取失败（${response.status}）`, { status: response.status, payload })
   return payload
 }

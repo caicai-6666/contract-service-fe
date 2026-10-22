@@ -1,4 +1,5 @@
 <script setup>
+import CenteredLoading from './CenteredLoading.vue'
 import {
   computed,
   nextTick,
@@ -16,7 +17,7 @@ import PdfPreviewOverlay from './PdfPreviewOverlay.vue'
 import DeleteConversationDialog from './DeleteConversationDialog.vue'
 import onlineSearchImage from '../assets/online-search.webp'
 import localSearchImage from '../assets/local-search.webp'
-import externalExpertImage from '../assets/expert.webp'
+import externalExpertImage from '../assets/external-expert.webp'
 import { taskProgressPresentation } from '../models/communicationProgress.js'
 import { getSelectedFileKind, convertImageFileToPdf } from '../services/local-file-pdf.js'
 import { clipboardFiles } from '../services/clipboardFiles.js'
@@ -948,8 +949,9 @@ onBeforeUnmount(() => {
         </button>
 
         <div class="contract-agent__history-menu" role="menu" aria-label="选择历史对话">
-          <div v-if="listLoading || listError" class="communication-history-notice" role="status">
-            <span>{{ listLoading ? '正在加载会话…' : listError }}</span>
+          <CenteredLoading v-if="listLoading" label="正在加载会话" style="--loading-min-height: 48px; --loading-size: 18px" />
+          <div v-else-if="listError" class="communication-history-notice" role="status">
+            <span>{{ listError }}</span>
             <button v-if="listError && !listLoading" type="button" @click.stop="communication.refreshConversations()">重试</button>
           </div>
           <div
@@ -1092,7 +1094,7 @@ onBeforeUnmount(() => {
           >
             <div ref="messageContentRef" class="contract-agent__messages-content">
             <div v-if="currentConversation.registered" class="communication-history-control" role="status">
-              <span v-if="currentConversation.historyLoading">正在加载历史…</span>
+              <CenteredLoading v-if="currentConversation.historyLoading" label="正在加载历史" style="--loading-min-height: 32px; --loading-size: 16px" />
               <template v-else-if="currentConversation.historyError">
                 <span>{{ currentConversation.historyError }}</span><button type="button" @click="retryHistory">{{ currentConversation.historyNeedsOpen ? '重新打开' : '重试' }}</button>
               </template>

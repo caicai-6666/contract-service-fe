@@ -365,11 +365,11 @@ export function createCommunicationSession() {
 
   async function restore() {
     try {
-      const token = getAuthSession()?.loginCode
-      if (!token) return
-      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))
+      const userId = getAuthSession()?.userId
+      if (!userId) return
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(userId))
       if (disposed) return
-      storageKey = `contract-communication-v1:${Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')}`
+      storageKey = `contract-communication-v2:${Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')}`
       const saved = JSON.parse(window.sessionStorage.getItem(storageKey) || 'null')
       const records = saved?.conversations
       if (Array.isArray(records) && records.length) {
@@ -386,7 +386,7 @@ export function createCommunicationSession() {
       }
     } catch { /* 不可信或不可用的本地缓存不阻断新会话。 */ }
     finally {
-      if (getAuthSession()?.loginCode) await refreshConversations()
+      if (getAuthSession()?.userId) await refreshConversations()
       await loadHistory(conversations.value.find((conversation) => conversation.id === selectedConversationId.value))
       restoring.value = false
     }

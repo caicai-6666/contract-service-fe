@@ -1,9 +1,10 @@
+import { parseFileLevelJson } from '../models/fileLevel.js'
 import { CONTRACT_API_BASE_PATH, contractApiFetch, ContractApiError } from './contractApi.js'
 import { isSubmissionId, modelReviewIds, modelReviewDetail, modelCleanupPolicy } from '../models/pendingReviews.js'
 const base = `${CONTRACT_API_BASE_PATH}/ingestion-reviews`
 async function read(path, signal) {
   const response = await contractApiFetch(path, { signal, cache: 'no-store' })
-  const payload = await response.json().catch(() => null)
+  const payload = await response.text().then(parseFileLevelJson).catch(() => null)
   if (!response.ok) throw new ContractApiError(typeof payload?.detail === 'string' ? payload.detail : `审核日志读取失败（${response.status}）`, { status: response.status, payload })
   return payload
 }

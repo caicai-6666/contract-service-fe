@@ -1,10 +1,13 @@
 import { normalizeAuthSession } from '../models/authSession.js'
 
-const AUTH_STORAGE_KEY = 'contract-reviewer-session'
+const ACCESS_TOKEN_STORAGE_KEY = 'access_token'
 const AUTH_EXPIRED_EVENT = 'contract-auth-expired'
-const CONTRACT_API_BASE_PATH = `${import.meta.env.DEV ? '/dev' : ''}/contract/api`
+const ACCESS_DENIED_EVENT = 'contract-access-denied'
+const CONTRACT_API_BASE_PATH = `${import.meta.env.BASE_URL}api`
+const KNOWLEDGE_ENTRY_PATH = import.meta.env.BASE_URL.slice(0, -'contract/'.length)
 
 let memorySession = null
+let validatedToken = null
 
 export class ContractApiError extends Error {
   constructor(message, { status = 0, payload = null } = {}) {
@@ -15,109 +18,87 @@ export class ContractApiError extends Error {
   }
 }
 
-function readResponsePayload(response) {
-  return response.json().catch(() => null)
-}
-
-function errorMessage(payload, fallback) {
-  if (typeof payload?.detail === 'string' && payload.detail.trim()) return payload.detail.trim()
-  return fallback
+export function getAccessToken() {
+  try {
+    const token = window.localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)
+    return typeof token === 'string' && /^[\x21-\x7e]+$/.test(token) ? token : null
+  } catch {
+    return null
+  }
 }
 
 export function getAuthSession() {
-  if (memorySession) return memorySession
-
-  try {
-    const storedSession = normalizeAuthSession(JSON.parse(window.sessionStorage.getItem(AUTH_STORAGE_KEY)))
-    if (storedSession) {
-      memorySession = storedSession
-      // 旧缓存仅保留当前认证字段，不因多余字段使有效登录失效。
-      try { window.sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(storedSession)) } catch {}
-    }
-    else window.sessionStorage.removeItem(AUTH_STORAGE_KEY)
-  } catch {
-    try {
-      window.sessionStorage.removeItem(AUTH_STORAGE_KEY)
-    } catch {
-      // 浏览器禁用会话存储时回退到内存会话。
-    }
-  }
-
-  return memorySession
-}
-
-export function saveAuthSession(session) {
-  const normalizedSession = normalizeAuthSession(session)
-  if (!normalizedSession) throw new TypeError('登录响应缺少有效的免登码或审核人名称')
-
-  memorySession = normalizedSession
-  try {
-    window.sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(normalizedSession))
-  } catch {
-    // 浏览器禁用会话存储时，当前页面生命周期内仍可使用内存会话。
-  }
-
-  return normalizedSession
+  return validatedToken && validatedToken === getAccessToken() ? memorySession : null
 }
 
 export function clearAuthSession() {
   memorySession = null
-  try {
-    window.sessionStorage.removeItem(AUTH_STORAGE_KEY)
-  } catch {
-    // 清理内存会话已经足以使当前页面退出登录。
-  }
+  validatedToken = null
 }
 
-export async function loginWithSecretKey(secretKey, { signal } = {}) {
-  const response = await fetch(`${CONTRACT_API_BASE_PATH}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ secret_key: secretKey }),
-    signal,
-  })
-  const payload = await readResponsePayload(response)
-
-  if (!response.ok) {
-    const fallback = response.status === 401
-      ? '审核用户密钥无效'
-      : response.status === 422
-        ? '密钥格式不正确，请检查后重试'
-        : `登录服务暂时不可用（${response.status}）`
-    throw new ContractApiError(errorMessage(payload, fallback), {
-      status: response.status,
-      payload,
-    })
-  }
-
-  const session = normalizeAuthSession({
-    loginCode: payload?.login_code,
-    userName: payload?.user_name,
-  })
-  if (!session) {
-    throw new ContractApiError('登录服务返回了无效的会话信息', {
-      status: response.status,
-      payload,
-    })
-  }
-
-  return saveAuthSession(session)
+function notifyAuthFailure(status, requestToken) {
+  // 旧凭据请求的迟到响应不能覆盖统一入口刚更新的身份。
+  if (requestToken !== getAccessToken()) return
+  clearAuthSession()
+  window.dispatchEvent(new CustomEvent(status === 403 ? ACCESS_DENIED_EVENT : AUTH_EXPIRED_EVENT))
 }
 
 export async function contractApiFetch(input, init = {}) {
-  const session = getAuthSession()
-  if (!session) throw new ContractApiError('登录状态已失效，请重新登录', { status: 401 })
-
-  const headers = new Headers(init.headers)
-  headers.set('Authorization', `Bearer ${session.loginCode}`)
-  const response = await fetch(input, { ...init, headers })
-
-  if (response.status === 401) {
-    clearAuthSession()
-    window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT))
+  const target = typeof input === 'string' ? new URL(input, 'https://contract.invalid') : null
+  if (!target || !input.startsWith('/') || input.startsWith('//')
+    || target.origin !== 'https://contract.invalid' || target.hash
+    || !target.pathname.startsWith(`${CONTRACT_API_BASE_PATH}/`)) {
+    throw new TypeError('受保护请求只能访问合同平台 API')
   }
 
+  const token = getAccessToken()
+  if (!token) {
+    notifyAuthFailure(401, token)
+    throw new ContractApiError('请从知识沉淀入口进入', { status: 401 })
+  }
+
+  const headers = new Headers(init.headers)
+  headers.set('Authorization', `Bearer ${token}`)
+  const response = await fetch(input, { ...init, headers, redirect: 'error' })
+  if (response.status === 401 || response.status === 403) notifyAuthFailure(response.status, token)
   return response
 }
 
-export { AUTH_EXPIRED_EVENT, CONTRACT_API_BASE_PATH }
+export async function fetchCurrentUser({ signal } = {}) {
+  const token = getAccessToken()
+  const controller = new AbortController()
+  const abort = () => controller.abort(signal.reason)
+  if (signal?.aborted) abort()
+  else signal?.addEventListener('abort', abort, { once: true })
+  const timeout = setTimeout(() => controller.abort(new DOMException('身份确认超时，请稍后重试', 'TimeoutError')), 15000)
+
+  try {
+    const response = await contractApiFetch(`${CONTRACT_API_BASE_PATH}/auth/me`, {
+      method: 'GET', cache: 'no-store', signal: controller.signal,
+    })
+    const payload = await response.json().catch(() => {
+      if (controller.signal.aborted) throw controller.signal.reason
+      return null
+    })
+    controller.signal.throwIfAborted()
+    if (token !== getAccessToken()) throw new DOMException('登录身份已变化', 'AbortError')
+    if (!response.ok) {
+      throw new ContractApiError(typeof payload?.detail === 'string' ? payload.detail : '暂时无法确认登录状态，请稍后重试', {
+        status: response.status, payload,
+      })
+    }
+    const session = normalizeAuthSession(payload)
+    if (!session) throw new ContractApiError('用户服务返回了无效的身份信息，请稍后重试')
+    memorySession = session
+    validatedToken = token
+    return session
+  } catch (error) {
+    if (!signal?.aborted && token !== getAccessToken()) throw new DOMException('登录身份已变化', 'AbortError')
+    throw error
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener('abort', abort)
+  }
+}
+
+export { ACCESS_TOKEN_STORAGE_KEY, AUTH_EXPIRED_EVENT, ACCESS_DENIED_EVENT, CONTRACT_API_BASE_PATH, KNOWLEDGE_ENTRY_PATH }

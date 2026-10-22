@@ -10,7 +10,7 @@
 | 智能助手 | 流式问答与执行过程展示、会话历史、附件上传与预览、引用正式合同；自动重连与模块切换状态保留 | [会话交互](description/features/agent-conversation.md) |
 | 处理流 | 单份与批量提取、重复性判断、分类与概述生成、Core 字段和条款校对、提交入库审核申请 | [处理流](description/features/contract-ingestion.md) |
 | 关系网 | 搜索中心合同、查看一跳无向关联；三维分子节点、动态切换中心、合同摘要与关联详情 | [合同关系网](description/features/contract-network.md) |
-| 审核信箱 | 工作台全局入口；入库与删除审核记录、我的入库申请筛选、发送与执行状态、PDF 预览、清理倒计时 | [审核日志](description/features/contract-ingestion.md#审核日志) |
+| 审核信箱 | 工作台全局入口；入库与删除审核记录、文件权限变更记录、我的入库申请筛选、发送与执行状态、PDF 预览、清理倒计时 | [审核日志](description/features/contract-ingestion.md#审核日志) |
 
 提交入库或删除申请成功只表示申请已保存，审核通过与实际入库、删除分别展示。PDF、附件、合同关联等读取结果按各自规则在当前页面内存中缓存，具体失效和容量边界见对应专题文档。
 
@@ -64,9 +64,9 @@ npm ci
 npm run dev
 ```
 
-开发服务器固定监听 `0.0.0.0:20080`；端口被占用时直接启动失败。当前开发基础路径为 `/dev/contract/`，页面包括 `/dev/contract/library`、`/dev/contract/ingestion` 和 `/dev/contract/network`。
+开发服务器固定监听 `0.0.0.0:20080`；端口被占用时直接启动失败。当前开发基础路径为 `/dev/knowledge-accumulation/contract/`，页面包括 `/dev/knowledge-accumulation/contract/library`、`/dev/knowledge-accumulation/contract/ingestion` 和 `/dev/knowledge-accumulation/contract/network`。
 
-完整联调需要已运行的后端及项目约定的 Nginx 入口。API 请求依赖网关去除 `/dev` 前缀，再通过 `/contract/api` 转发；不能仅凭 Vite 端口可访问就认为接口已经连通。后端地址与路径规则见 [登录与鉴权](description/platform/authentication.md)和[路由与部署要求](description/platform/routing.md)。登录使用后端配置的用户密钥，免登码随受保护请求作为 Bearer 凭据发送，不在仓库中保存密钥或令牌。
+完整联调需要已运行的后端及项目约定的 Nginx 入口。浏览器的开发 API 路径为 `/dev/knowledge-accumulation/contract/api`，Vite 去除 `/dev` 后转发至后端，同时兼容网关已去除 `/dev` 的请求。统一入口和合同平台仍须经过同源网关共享登录凭据，直接访问 Vite 的其他端口不会共享登录。后端地址与路径规则见 [登录与鉴权](description/platform/authentication.md)和[路由与部署要求](description/platform/routing.md)。统一入口负责登录并在同源 `localStorage.access_token` 中提供凭据；本页面通过 `GET /auth/me` 确认身份，后续 API、PDF 与 SSE 都使用该 token，不再提供密钥输入界面。
 
 ## PDF.js 运行时资源
 
@@ -86,7 +86,7 @@ npm run sync:pdfjs-assets
 npm run build
 ```
 
-构建产物输出到 `dist/`。部署时需保留完整目录，包括 `dist/pdfjs/` 中的 PDF.js 运行时资源。生产基础路径、History 路由回退及 SSE 转发需与网关一致；容器构建使用 `/contract/` 作为基础路径。
+构建产物输出到 `dist/`。部署时需保留完整目录，包括 `dist/pdfjs/` 中的 PDF.js 运行时资源。生产基础路径、History 路由回退及 SSE 转发需与网关一致；容器构建使用 `/knowledge-accumulation/contract/` 作为基础路径。
 
 ## Docker 部署
 

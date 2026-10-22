@@ -3,6 +3,7 @@ import ContractPdfReader from './ContractPdfReader.vue'
 import PdfLoadingAnimation from './PdfLoadingAnimation.vue'
 import ContractSummaryPopover from './ContractSummaryPopover.vue'
 import ContractPassportsPopover from './ContractPassportsPopover.vue'
+import ContractFileLevelPopover from './ContractFileLevelPopover.vue'
 import alertListIcon from '../assets/alert-list.webp'
 import pinIcon from '../assets/pin.webp'
 import linkIcon from '../assets/link.webp'
@@ -16,8 +17,11 @@ const props = defineProps({
   src: { type: String, default: '' },
   label: { type: String, default: 'PDF 文档' },
   summaryDocumentId: { type: String, default: '' },
+  cacheRevision: { type: Number, default: 0 },
   showPassports: { type: Boolean, default: false },
   passports: { type: Array, default: null },
+  showFileLevel: { type: Boolean, default: false },
+  fileLevel: { type: String, default: null },
   loading: { type: Boolean, default: false },
   error: { type: String, default: '' },
   retryable: { type: Boolean, default: true },
@@ -30,6 +34,10 @@ const props = defineProps({
   deleting: { type: Boolean, default: false },
   deleteError: { type: String, default: '' },
 })
+
+// 保留轻量浮层及其 KeepAlive 边界；PDF 阅读器仍在关闭时释放渲染资源。
+const initialized = ref(false)
+watch(() => props.open, open => { if (open) initialized.value = true }, { immediate: true })
 
 const deleteConfirmation = ref(false)
 const deleteNote = ref('')
@@ -120,7 +128,8 @@ const emit = defineEmits(['close', 'retry', 'delete', 'pin'])
 
     <Transition name="pdf-preview">
       <section
-        v-if="open"
+        v-if="initialized"
+        v-show="open"
         class="pdf-preview"
         role="dialog"
         aria-modal="true"
@@ -131,14 +140,14 @@ const emit = defineEmits(['close', 'retry', 'delete', 'pin'])
         <div class="pdf-preview__viewer">
           <div class="pdf-preview__surface" :inert="panelOpen" :aria-hidden="panelOpen || undefined">
           <ContractPdfReader
-            v-if="controlledReader"
+            v-if="open && controlledReader"
             :src="!loading && !error ? src : ''"
             :label="label"
             @ready="frameLoaded = true"
             @error="readerError = $event"
           />
           <iframe
-            v-else-if="src && !loading && !error"
+            v-else-if="open && src && !loading && !error"
             :key="src"
             :class="{ 'is-ready': contentReady }"
             :aria-hidden="!contentReady"
@@ -159,12 +168,15 @@ const emit = defineEmits(['close', 'retry', 'delete', 'pin'])
           </div>
           </Transition>
 
-          <ContractSummaryPopover v-if="summaryDocumentId && !panelOpen" :key="summaryDocumentId" :document-id="summaryDocumentId" />
+          <KeepAlive :key="cacheRevision" :max="20">
+            <ContractSummaryPopover v-if="open && summaryDocumentId && !panelOpen" :key="summaryDocumentId" :document-id="summaryDocumentId" />
+          </KeepAlive>
 
           <button v-if="showPin && !panelOpen" type="button" class="pdf-preview__pin" :class="{ 'is-pinned': pinned }" :aria-pressed="pinned" :aria-label="pinned ? '取消引用当前合同' : '引用当前合同到会话'" :title="pinned ? '已加入会话，点击取消引用' : '引用到会话'" @click="$emit('pin')">
             <img :src="pinIcon" alt="" />
           </button>
           <ContractPassportsPopover v-if="showPassports && summaryDocumentId && !panelOpen" :key="`passports:${summaryDocumentId}`" :document-id="summaryDocumentId" :passports="passports" />
+          <ContractFileLevelPopover v-if="showFileLevel && summaryDocumentId && !panelOpen" :key="`level:${summaryDocumentId}`" :document-id="summaryDocumentId" :file-level="fileLevel" />
 
           <!-- Interaction adapted from Uiverse.io by ElgyoshiMa91846 -->
           <div v-if="showToolbar && !loading" class="pdf-preview__actions" :class="{ 'is-open': actionsOpen || deleteConfirmation }" @mouseleave="actionsOpen = false">
@@ -237,7 +249,7 @@ const emit = defineEmits(['close', 'retry', 'delete', 'pin'])
           </div>
           <Transition name="pdf-notes">
             <div
-              v-if="panelOpen"
+              v-show="panelOpen"
               ref="panelLayer"
               class="pdf-preview__notes-layer"
               role="dialog"
@@ -246,7 +258,7 @@ const emit = defineEmits(['close', 'retry', 'delete', 'pin'])
               @click.self="closePanel"
               @keydown.tab="trapPanelFocus"
             >
-              <div class="pdf-preview__notes-card"><slot :name="activePanel" :close="closePanel"></slot></div>
+              <div class="pdf-preview__notes-card"><slot name="panels" :panel="open ? activePanel : ''" :close="closePanel"></slot></div>
             </div>
           </Transition>
         </div>

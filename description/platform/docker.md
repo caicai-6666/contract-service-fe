@@ -12,7 +12,9 @@ docker build -t contract-service-fe:local .
 
 Dockerfile 使用 Node 24 安装锁文件中的依赖并构建，再将完整 `dist/` 复制到 Nginx 运行镜像。`prebuild` 自动生成 PDF.js 的 CMap、字体和 WASM 资源；本地 `node_modules/`、`dist/`、生成资源和 `.env` 文件不会进入构建上下文。运行镜像不包含项目源码或 Node 依赖。
 
-容器构建显式使用 `/contract/` 作为 Vite 基础路径，不修改本地开发配置。页面入口为 `/contract/library`，API 为同源 `/contract/api/`；根路径跳转到 `/contract/`。外层反向代理应保留完整 `/contract/` 前缀，不沿用开发环境去除 `/dev` 的规则。
+容器构建显式使用 `/knowledge-accumulation/contract/` 作为 Vite 基础路径，不修改本地开发配置。页面入口为 `/knowledge-accumulation/contract/library`，API 为同源 `/knowledge-accumulation/contract/api/`；根路径跳转到 `/knowledge-accumulation/contract/`。外层反向代理应保留完整 `/knowledge-accumulation/contract/` 前缀，不沿用开发环境去除 `/dev` 的规则。
+
+统一入口与合同平台需使用相同协议、域名和端口，以共享 `localStorage.access_token`；网关同时转发 `/knowledge-accumulation/` 统一入口与本平台子路径。返回入口的链接由外层网关处理。
 
 ## 运行
 
@@ -26,7 +28,7 @@ docker run -d --name contract-service-fe \
   contract-service-fe:local
 ```
 
-访问 `http://localhost:8080/contract/library`。宿主机后端必须监听容器可达的地址；仅绑定宿主机 `127.0.0.1` 的服务通常不能通过宿主机网关访问。不要为此将后端无保护地暴露到公网。
+访问 `http://localhost:8080/knowledge-accumulation/contract/library`。宿主机后端必须监听容器可达的地址；仅绑定宿主机 `127.0.0.1` 的服务通常不能通过宿主机网关访问。不要为此将后端无保护地暴露到公网。
 
 后端也在 Docker 中时，将前后端加入同一自定义网络，并将 `BACKEND_UPSTREAM` 设置为后端容器名称及容器内端口。默认值 `contract-service:20000` 是部署约定，不代表已创建该后端；该名称必须能够在容器启动时解析，否则 Nginx 无法启动。
 
@@ -38,7 +40,7 @@ docker run -d --name contract-service-fe \
 
 仓库根目录的 [`nginx.conf`](../../nginx.conf) 是服务配置模板，Dockerfile 将其复制到 `/etc/nginx/templates/default.conf.template`，容器启动时替换环境变量并生成 `/etc/nginx/conf.d/default.conf`。它是 `server` 配置片段，不是用于替换 `/etc/nginx/nginx.conf` 的全局配置。
 
-变量由 Nginx 官方镜像启动脚本写入配置，修改后需重建容器，不必重新构建镜像。只允许可信部署人员设置这些变量，不放入登录密钥。HTTPS 在外层网关终止；本镜像监听 HTTP 80。
+变量由 Nginx 官方镜像启动脚本写入配置，修改后需重建容器，不必重新构建镜像。只允许可信部署人员设置这些变量，不放入 access_token。HTTPS 在外层网关终止；本镜像监听 HTTP 80。
 
 ## 转发与缓存边界
 
@@ -56,9 +58,9 @@ docker run -d --name contract-service-fe \
 
 ```bash
 docker exec contract-service-fe nginx -t
-curl -I http://localhost:8080/contract/library
-curl -I http://localhost:8080/contract/ingestion
-curl -i http://localhost:8080/contract/assets/missing.js
+curl -I http://localhost:8080/knowledge-accumulation/contract/library
+curl -I http://localhost:8080/knowledge-accumulation/contract/ingestion
+curl -i http://localhost:8080/knowledge-accumulation/contract/assets/missing.js
 docker logs contract-service-fe
 ```
 

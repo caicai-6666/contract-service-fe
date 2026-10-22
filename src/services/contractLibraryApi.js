@@ -1,7 +1,7 @@
-import { invalidateContractData } from './contractDataRevision.js'
+import { invalidateContractData, invalidateReviewData } from './contractDataRevision.js'
 import { CONTRACT_API_BASE_PATH, ContractApiError, contractApiFetch } from './contractApi.js'
 import { modelContractCategories } from '../models/contractCategories.js'
-import { modelContractDocuments } from '../models/contractDocuments.js'
+import { modelContractDocuments, parseContractDocumentsJson } from '../models/contractDocuments.js'
 import { isSubmissionId } from '../models/pendingReviews.js'
 
 export async function deleteContractDocument(documentId, { note } = {}) {
@@ -11,7 +11,7 @@ export async function deleteContractDocument(documentId, { note } = {}) {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ note }),
-  }).finally(invalidateContractData)
+  }).finally(() => { invalidateContractData(); invalidateReviewData('deletion') })
   const payload = await response.json().catch(() => null)
   if (response.status === 202) {
     if (!isSubmissionId(payload?.submission_id) || payload.document_id !== documentId
@@ -33,7 +33,7 @@ export async function deleteContractDocument(documentId, { note } = {}) {
 
 export async function getContractDocuments({ signal } = {}) {
   const response = await contractApiFetch(`${CONTRACT_API_BASE_PATH}/contract/documents`, { signal, cache: 'no-store' })
-  const payload = await response.json().catch(() => null)
+  const payload = await response.text().then(parseContractDocumentsJson).catch(() => null)
   if (response.status !== 200) {
     throw new ContractApiError(
       typeof payload?.detail === 'string' && payload.detail.trim()
