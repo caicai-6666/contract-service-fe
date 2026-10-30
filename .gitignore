@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# 本机连接配置不参与版本控制。
+.env
+.env.*
+!.env.example
+
 # 本地测试文件不纳入版本控制
 /tests/
 

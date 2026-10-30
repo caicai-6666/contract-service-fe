@@ -64,9 +64,11 @@ npm ci
 npm run dev
 ```
 
-开发服务器固定监听 `0.0.0.0:20080`；端口被占用时直接启动失败。当前开发基础路径为 `/dev/knowledge-accumulation/contract/`，页面包括 `/dev/knowledge-accumulation/contract/library`、`/dev/knowledge-accumulation/contract/ingestion` 和 `/dev/knowledge-accumulation/contract/network`。
+后端地址默认使用 `http://127.0.0.1:17000`。需要调整时，参照 [`.env.example`](.env.example) 创建或修改本机 `.env` 中的 `CONTRACT_BACKEND_URL`，然后重启 Vite；已有 `.env` 不应直接覆盖。该变量只控制开发代理，不替代 Docker 的 `BACKEND_UPSTREAM`。
 
-完整联调需要已运行的后端及项目约定的 Nginx 入口。浏览器的开发 API 路径为 `/dev/knowledge-accumulation/contract/api`，Vite 去除 `/dev` 后转发至后端，同时兼容网关已去除 `/dev` 的请求。统一入口和合同平台仍须经过同源网关共享登录凭据，直接访问 Vite 的其他端口不会共享登录。后端地址与路径规则见 [登录与鉴权](description/platform/authentication.md)和[路由与部署要求](description/platform/routing.md)。统一入口负责登录并在同源 `localStorage.access_token` 中提供凭据；本页面通过 `GET /auth/me` 确认身份，后续 API、PDF 与 SSE 都使用该 token，不再提供密钥输入界面。
+开发服务器固定监听 `0.0.0.0:17080`；端口被占用时直接启动失败。当前开发基础路径为 `/dev/knowledge-accumulation/contract/`，页面包括 `/dev/knowledge-accumulation/contract/library`、`/dev/knowledge-accumulation/contract/ingestion` 和 `/dev/knowledge-accumulation/contract/network`。
+
+完整联调需要已运行的后端及项目约定的 Nginx 入口。浏览器的开发 API 路径为 `/dev/knowledge-accumulation/contract/api`，网关与 Vite 均保留 `/dev` 并转发到 `http://127.0.0.1:17000`；映射入口为 `https://talent.szkl.com/dev/knowledge-accumulation/contract/`。统一入口和合同平台仍须经过同源网关共享登录凭据，直接访问 Vite 的其他端口不会共享登录。后端地址与路径规则见 [登录与鉴权](description/platform/authentication.md)和[路由与部署要求](description/platform/routing.md)。统一入口负责登录并在同源 `localStorage.access_token` 中提供凭据；本页面通过 `GET /auth/me` 确认身份，后续 API、PDF 与 SSE 都使用该 token，不再提供密钥输入界面。
 
 ## PDF.js 运行时资源
 
@@ -83,10 +85,14 @@ npm run sync:pdfjs-assets
 执行：
 
 ```bash
-npm run build
+npm run build -- --base=/knowledge-accumulation/contract/
 ```
 
-构建产物输出到 `dist/`。部署时需保留完整目录，包括 `dist/pdfjs/` 中的 PDF.js 运行时资源。生产基础路径、History 路由回退及 SSE 转发需与网关一致；容器构建使用 `/knowledge-accumulation/contract/` 作为基础路径。
+构建产物输出到 `dist/`。部署时需保留完整目录，包括 `dist/pdfjs/` 中的 PDF.js 运行时资源。上述命令与 Dockerfile 使用相同的生产基础路径；仅执行 `npm run build` 会沿用 Vite 配置中的 `/dev/knowledge-accumulation/contract/`，不能直接作为生产路径的部署产物。History 路由回退及 SSE 转发需与网关一致，见[Docker 部署](description/platform/docker.md)。
+
+## 验证方式
+
+当前 `package.json` 未提供 test、lint 或格式检查命令，`tests/` 被 Git 忽略，自动化测试套件不随仓库分发。各专题文档中的验证范围是回归检查要求，不代表仓库附带了相应自动化测试。先检查受影响功能及失败路径，再执行上述生产构建；涉及路由、代理或资源路径时，还需按 [Docker 验证步骤](description/platform/docker.md#验证) 检查实际 HTTP 响应，并在同源登录入口完成业务联调。
 
 ## Docker 部署
 

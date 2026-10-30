@@ -12,23 +12,25 @@ docker build -t contract-service-fe:local .
 
 Dockerfile 使用 Node 24 安装锁文件中的依赖并构建，再将完整 `dist/` 复制到 Nginx 运行镜像。`prebuild` 自动生成 PDF.js 的 CMap、字体和 WASM 资源；本地 `node_modules/`、`dist/`、生成资源和 `.env` 文件不会进入构建上下文。运行镜像不包含项目源码或 Node 依赖。
 
-容器构建显式使用 `/knowledge-accumulation/contract/` 作为 Vite 基础路径，不修改本地开发配置。页面入口为 `/knowledge-accumulation/contract/library`，API 为同源 `/knowledge-accumulation/contract/api/`；根路径跳转到 `/knowledge-accumulation/contract/`。外层反向代理应保留完整 `/knowledge-accumulation/contract/` 前缀，不沿用开发环境去除 `/dev` 的规则。
+容器构建显式使用 `/knowledge-accumulation/contract/` 作为 Vite 基础路径，不修改本地开发配置。页面入口为 `/knowledge-accumulation/contract/library`，API 为同源 `/knowledge-accumulation/contract/api/`；根路径跳转到 `/knowledge-accumulation/contract/`。外层反向代理应保留完整 `/knowledge-accumulation/contract/` 前缀。开发环境则保留完整 `/dev/knowledge-accumulation/contract/`，由开发后端提供同名 API 前缀。
 
 统一入口与合同平台需使用相同协议、域名和端口，以共享 `localStorage.access_token`；网关同时转发 `/knowledge-accumulation/` 统一入口与本平台子路径。返回入口的链接由外层网关处理。
 
 ## 运行
 
-后端位于宿主机时：
+后端位于宿主机且通过端口 `17000` 提供生产 API 前缀 `/knowledge-accumulation/contract/api` 时：
 
 ```bash
 docker run -d --name contract-service-fe \
   -p 8080:80 \
   --add-host=host.docker.internal:host-gateway \
-  -e BACKEND_UPSTREAM=host.docker.internal:20000 \
+  -e BACKEND_UPSTREAM=host.docker.internal:17000 \
   contract-service-fe:local
 ```
 
 访问 `http://localhost:8080/knowledge-accumulation/contract/library`。宿主机后端必须监听容器可达的地址；仅绑定宿主机 `127.0.0.1` 的服务通常不能通过宿主机网关访问。不要为此将后端无保护地暴露到公网。
+
+直接运行后端 `app/main.py` 使用带 `/dev` 的开发 API 前缀，不能直接接入此生产 Nginx 示例；仅调整端口不会转换 API 路径。生产后端应使用 ASGI 入口且不设置 `APP_PATH_PREFIX=/dev`，具体启动方式由后端部署文档维护。本机开发使用 Vite 对接开发后端。
 
 后端也在 Docker 中时，将前后端加入同一自定义网络，并将 `BACKEND_UPSTREAM` 设置为后端容器名称及容器内端口。默认值 `contract-service:20000` 是部署约定，不代表已创建该后端；该名称必须能够在容器启动时解析，否则 Nginx 无法启动。
 
@@ -66,4 +68,4 @@ docker logs contract-service-fe
 
 前两个页面应返回 HTML，缺失资源应返回 404。进一步在浏览器验证登录、页面刷新、PDF 封面与预览、上传和 SSE；后端未启动时 API 应返回网关错误而非 HTML 页面。
 
-图片缓存回归可在构建后执行 `python3 tests/iconCacheDocker.py contract-service-fe:local`。脚本启动临时容器并自动清理，验证默认 30 天和环境变量覆盖、所有构建图片、公共 SVG 的 304、HTML/PDF.js 重验证、缺失资源 404 及 API 不套用图片缓存。验证容器不连接真实后端。
+图片缓存检查应从页面或构建产物中取得真实资源 URL，用 `curl -I` 核对图片的 `Cache-Control` 默认包含 `max-age=2592000`，JS/CSS 包含 `max-age=31536000`，HTML 与 PDF.js 资源为 `no-cache`。覆盖 `ICON_CACHE_MAX_AGE` 并重新创建容器后，确认图片响应使用新值；同时检查缺失资源返回 404、API 不套用图片缓存。仓库不提供独立的图片缓存回归脚本，不能将这些检查视为构建自动完成。

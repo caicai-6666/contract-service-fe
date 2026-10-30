@@ -29,7 +29,7 @@
 
 全部合同 API、PDF 和 SSE 新连接通过 `contractApiFetch` 读取最新共享 token，并附加 Bearer 请求头。该入口仅接受本平台同源 API 路径并禁止重定向，不向外部网页发送凭据；正文中的网页链接探测仍不带合同凭据。
 
-生产 API 前缀为 `/knowledge-accumulation/contract/api`，开发为 `/dev/knowledge-accumulation/contract/api`。开发时 Vite 去除 `/dev` 后转发至后端，同时接受网关已经去除 `/dev` 的 API 请求；Docker Nginx 保留完整生产路径转发，不进入 SPA 回退。页面及静态资源路径见[页面路由](routing.md)，容器配置见[Docker 部署](docker.md)。
+生产 API 前缀为 `/knowledge-accumulation/contract/api`，开发为 `/dev/knowledge-accumulation/contract/api`。开发时网关与 Vite 均保留 `/dev`，后端通过 `app/main.py` 直接启动时在 `127.0.0.1:17000` 提供相同前缀；Vite 从 `.env` 读取 `CONTRACT_BACKEND_URL`，默认 `http://127.0.0.1:17000`，只允许无凭据、路径和查询参数的 HTTP/HTTPS 根地址。模板见 [`.env.example`](../../.env.example)。Docker Nginx 保留完整生产路径转发，不进入 SPA 回退。页面及静态资源路径见[页面路由](routing.md)，容器配置见[Docker 部署](docker.md)。
 
 业务请求返回 401/403 时释放本页身份与工作台缓存，显示对应回退页，但不修改共享 token；503 等服务异常保留原有业务错误及重试入口。SSE 不设置身份查询的 15 秒期限，原有自动重连策略继续生效。
 
