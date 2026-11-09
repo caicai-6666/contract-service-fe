@@ -46,6 +46,8 @@ docker run -d --name contract-service-fe \
 
 ## 转发与缓存边界
 
+- 生产 Nginx 对至少 1 KiB 的 HTML、JavaScript（含 Worker）、CSS、JSON、XML、SVG、纯文本及 WASM 启用 gzip，压缩等级为 5；客户端须声明支持 gzip。响应通过 `Vary: Accept-Encoding` 区分编码，外层代理携带 `Via` 时也允许压缩。WebP、PNG、JPEG、PDF 等二进制类型不在压缩列表中；小于阈值的资源保持原样。生产镜像未安装 Brotli 模块，开发服务器的 Brotli 能力不代表生产支持 Brotli。
+- API 路径显式关闭本层 gzip，SSE 和受保护的 PDF 不经过本层压缩；上游已有的内容编码仍按原响应转发。压缩不改变下面的缓存期限，外层网关应保留 `Content-Encoding`、`Vary` 及缓存响应头。此配置固化在镜像内，更新后需重新构建并创建前端容器，无需新增 Compose 变量。
 - API 保留原始路径、查询参数和 Authorization 请求头，不做 SPA 回退或共享缓存。
 - 关闭代理响应缓冲以支持 SSE；读取超时为两次上游读取之间最长 3600 秒，而非任务总时长。外层网关也必须支持流式转发。
 - 页面路由回退到 `index.html`；缺失的构建资源和 PDF.js 文件返回 404。
@@ -70,3 +72,5 @@ docker logs contract-service-fe
 前两个页面应返回 HTML，缺失资源应返回 404。进一步在浏览器验证登录、页面刷新、PDF 封面与预览、上传和 SSE；后端未启动时 API 应返回网关错误而非 HTML 页面。
 
 图片缓存检查应从页面或构建产物中取得真实资源 URL，用 `curl -I` 核对图片的 `Cache-Control` 默认包含 `max-age=2592000`，JS/CSS 包含 `max-age=31536000`，HTML 与 PDF.js 资源为 `no-cache`。覆盖 `ICON_CACHE_MAX_AGE` 并重新创建容器后，确认图片响应使用新值；同时检查缺失资源返回 404、API 不套用图片缓存。仓库不提供独立的图片缓存回归脚本，不能将这些检查视为构建自动完成。
+
+压缩检查使用实际构建中大于 1 KiB 的 JS/CSS 地址：执行 `curl -sS -D - -o /dev/null -H 'Accept-Encoding: gzip' <资源URL>`，应返回 `Content-Encoding: gzip` 与含 `Accept-Encoding` 的 `Vary`；增加 `Via: 1.1 gateway` 后仍应压缩。再以 `Accept-Encoding: identity` 请求，确认内容不压缩且缓存策略相同；压缩响应解压后的内容应与原始资源一致。HTML 小于 1 KiB 时不压缩属于预期。API 和 SSE 需另行检查鉴权转发与首事件及时到达，不能仅凭静态资源压缩成功判断业务链路正常。
