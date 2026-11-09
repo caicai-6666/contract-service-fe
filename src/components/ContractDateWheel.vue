@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, useId, watch } from 'vue'
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -15,6 +15,67 @@ const yearWheel = ref(null)
 const monthWheel = ref(null)
 const dayWheel = ref(null)
 const settleTimers = { year: null, month: null, day: null }
+const labels = { year: '年份', month: '月份', day: '日期' }
+const editing = ref(null)
+const inputValue = ref('')
+const inputError = ref('')
+const errorId = useId()
+let inputElement
+
+function setInputElement(element) {
+  inputElement = element
+}
+
+async function startEditing(type) {
+  if (props.disabled) return
+  clearSettleTimer(type)
+  editing.value = type
+  inputValue.value = selected[type] === null ? '' : String(selected[type])
+  inputError.value = ''
+  alignWheel(type)
+  await nextTick()
+  inputElement?.focus({ preventScroll: true })
+  inputElement?.select()
+}
+
+function finishEditing({ cancel = false, blur = false } = {}) {
+  const type = editing.value
+  if (!type) return
+  if (cancel || props.disabled) {
+    editing.value = null
+    inputError.value = ''
+  } else {
+    const text = inputValue.value.trim()
+    const value = text === '' ? null : Number(text)
+    // 与现有签订日期校验一致：Date.UTC 不接受 0–99 年作为原年份。
+    const min = type === 'year' ? 100 : 1
+    const max = type === 'year' ? 9999 : type === 'month' ? 12 : dayCount.value
+    if (text !== '' && (!/^\d+$/.test(text) || !Number.isInteger(value) || value < min || value > max)) {
+      inputError.value = `${labels[type]}请输入 ${min}–${max} 的整数，原值未修改`
+      if (!blur) return
+      editing.value = null
+    } else {
+      editing.value = null
+      inputError.value = ''
+      selectValue(type, value)
+    }
+  }
+  if (!blur) nextTick(() => wheelElement(type)?.focus({ preventScroll: true }))
+}
+
+function handleOptionClick(type, value) {
+  if (selected[type] === value) void startEditing(type)
+  else selectValue(type, value)
+}
+
+function handleInputKeydown(event) {
+  if (event.isComposing) return
+  if (event.key === 'Enter' || event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    finishEditing({ cancel: event.key === 'Escape' })
+  }
+}
 
 const years = computed(() => {
   const firstYear = Math.min(1900, selected.year || currentYear)
@@ -61,11 +122,12 @@ function emitDateIfComplete() {
   if (!selected.year || !selected.month || !selected.day) return
   const month = String(selected.month).padStart(2, '0')
   const day = String(selected.day).padStart(2, '0')
-  emit('update:modelValue', `${selected.year}-${month}-${day}`)
+  emit('update:modelValue', `${String(selected.year).padStart(4, '0')}-${month}-${day}`)
 }
 
 function selectValue(type, value, { align = true } = {}) {
   if (props.disabled) return
+  clearSettleTimer(type)
   selected[type] = value
   if (!value) {
     emit('update:modelValue', '')
@@ -80,12 +142,12 @@ function selectValue(type, value, { align = true } = {}) {
 }
 
 function handleWheelScroll(type) {
-  if (props.disabled) return
+  if (props.disabled || editing.value === type) return
   clearSettleTimer(type)
   settleTimers[type] = window.setTimeout(() => {
     settleTimers[type] = null
     const element = wheelElement(type)
-    if (!element) return
+    if (!element || props.disabled || editing.value === type) return
     const optionIndex = Math.round(element.scrollTop / ITEM_HEIGHT) - 1
     selectValue(type, wheelValues(type)[optionIndex] ?? null, { align: false })
     alignWheel(type, 'smooth')
@@ -95,6 +157,9 @@ function handleWheelScroll(type) {
 watch(
   () => props.modelValue,
   (value) => {
+    editing.value = null
+    inputError.value = ''
+    Object.keys(settleTimers).forEach(clearSettleTimer)
     const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || '')
     const year = match ? Number(match[1]) : null
     const month = match ? Number(match[2]) : null
@@ -115,6 +180,13 @@ watch(
   },
   { immediate: true },
 )
+
+watch(() => props.disabled, (disabled) => {
+  if (disabled) {
+    finishEditing({ cancel: true, blur: true })
+    Object.keys(settleTimers).forEach(clearSettleTimer)
+  }
+})
 
 onBeforeUnmount(() => Object.keys(settleTimers).forEach(clearSettleTimer))
 </script>
@@ -138,10 +210,15 @@ onBeforeUnmount(() => Object.keys(settleTimers).forEach(clearSettleTimer))
         <div
           :ref="(element) => setWheelElement(type, element)"
           class="contract-date-wheel__scroller"
+          :class="{ 'is-editing': editing === type }"
+          :inert="editing === type"
+          :aria-hidden="editing === type || undefined"
           role="listbox"
           :aria-label="`选择${{ year: '年份', month: '月份', day: '日期' }[type]}`"
           :tabindex="disabled ? -1 : 0"
           @scroll.passive="handleWheelScroll(type)"
+          @keydown.enter.self.prevent.stop="startEditing(type)"
+          @keydown.f2.prevent.stop="startEditing(type)"
         >
           <button
             type="button"
@@ -149,7 +226,8 @@ onBeforeUnmount(() => Object.keys(settleTimers).forEach(clearSettleTimer))
             :aria-selected="selected[type] === null"
             :disabled="disabled"
             :class="{ 'is-selected': selected[type] === null }"
-            @click="selectValue(type, null)"
+            :title="selected[type] === null ? `点击输入${labels[type]}` : undefined"
+            @click="handleOptionClick(type, null)"
           >—</button>
           <button
             v-for="value in wheelValues(type)"
@@ -159,12 +237,30 @@ onBeforeUnmount(() => Object.keys(settleTimers).forEach(clearSettleTimer))
             :aria-selected="selected[type] === value"
             :disabled="disabled"
             :class="{ 'is-selected': selected[type] === value }"
-            @click="selectValue(type, value)"
+            :title="selected[type] === value ? `点击输入${labels[type]}` : undefined"
+            @click="handleOptionClick(type, value)"
           >{{ String(value).padStart(type === 'year' ? 4 : 2, '0') }}</button>
         </div>
+        <input
+          v-if="editing === type"
+          :ref="setInputElement"
+          v-model="inputValue"
+          class="contract-date-wheel__input"
+          type="text"
+          inputmode="numeric"
+          autocomplete="off"
+          :aria-label="`输入${labels[type]}`"
+          :aria-invalid="Boolean(inputError)"
+          :aria-describedby="inputError ? errorId : undefined"
+          :disabled="disabled"
+          @input="inputError = ''"
+          @blur="finishEditing({ blur: true })"
+          @keydown="handleInputKeydown"
+        />
       </div>
       <strong>{{ { year: '年', month: '月', day: '日' }[type] }}</strong>
     </div>
+    <p v-if="inputError" :id="errorId" class="contract-date-wheel__error" role="alert">{{ inputError }}</p>
   </div>
 </template>
 
@@ -238,6 +334,31 @@ onBeforeUnmount(() => Object.keys(settleTimers).forEach(clearSettleTimer))
 .contract-date-wheel__scroller:focus-visible {
   outline: none;
 }
+
+.contract-date-wheel__scroller.is-editing { visibility: hidden; }
+
+.contract-date-wheel__input {
+  position: absolute;
+  z-index: 4;
+  top: 19px;
+  left: 4px;
+  width: calc(100% - 8px);
+  height: 34px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 5px;
+  outline: 2px solid rgb(152 119 60 / 45%);
+  background: rgb(247 239 222 / 90%);
+  color: #403b32;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 680;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.contract-date-wheel__input[aria-invalid='true'] { outline-color: #b25445; }
+.contract-date-wheel__error { grid-column: 1 / -1; margin: 0; color: #a34f43; font-size: 12px; }
 
 .contract-date-wheel__scroller button {
   display: block;
