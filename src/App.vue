@@ -1,9 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import ContractIngestionView from './components/ContractIngestionView.vue'
-import ContractLibraryView from './components/ContractLibraryView.vue'
-import ContractNetworkView from './components/ContractNetworkView.vue'
+import AsyncWorkspacePage from './components/AsyncWorkspacePage.vue'
 import AuthenticationStatus from './components/AuthenticationStatus.vue'
 import MolecularFieldBackground from './components/MolecularFieldBackground.vue'
 import ReviewLogDialog from './components/ReviewLogDialog.vue'
@@ -26,6 +24,11 @@ const visualEffectsPaused = ref(false)
 const reviewLogOpen = ref(false)
 const route = useRoute()
 const router = useRouter()
+const pageLoaders = {
+  library: () => import('./components/ContractLibraryView.vue'),
+  ingestion: () => import('./components/ContractIngestionView.vue'),
+  network: () => import('./components/ContractNetworkView.vue'),
+}
 
 const workspaceSections = [
   { label: '合同库', to: '/library' },
@@ -205,7 +208,8 @@ onBeforeUnmount(() => {
               :aria-hidden="activeSection !== 0"
               :inert="activeSection !== 0"
             >
-              <ContractLibraryView
+              <AsyncWorkspacePage
+                :load="pageLoaders.library" label="合同库"
                 :active="activeSection === 0"
               />
             </section>
@@ -214,7 +218,8 @@ onBeforeUnmount(() => {
               :aria-hidden="activeSection !== 1"
               :inert="activeSection !== 1"
             >
-              <ContractIngestionView
+              <AsyncWorkspacePage
+                :load="pageLoaders.ingestion" label="合同处理流"
                 :active="activeSection === 1"
                 @visual-pause-change="setVisualEffectsPaused"
               />
@@ -224,7 +229,7 @@ onBeforeUnmount(() => {
               :aria-hidden="activeSection !== 2"
               :inert="activeSection !== 2"
             >
-              <ContractNetworkView :active="activeSection === 2" />
+              <AsyncWorkspacePage :load="pageLoaders.network" label="合同关系网" :active="activeSection === 2" />
             </section>
           </div>
         </div>

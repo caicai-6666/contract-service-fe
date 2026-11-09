@@ -1,26 +1,25 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import ContractIngestionView from './components/ContractIngestionView.vue'
-import ContractLibraryView from './components/ContractLibraryView.vue'
-import ContractNetworkView from './components/ContractNetworkView.vue'
 
+// 路由只维护地址与轨道位置；页面由 App 按首次访问加载并持续挂载。
+const WorkspaceRoute = { name: 'WorkspaceRoute', render: () => null }
 const routes = [
   { path: '/', redirect: '/library' },
   {
     path: '/library',
     name: 'contract-library',
-    component: ContractLibraryView,
+    component: WorkspaceRoute,
     meta: { sectionIndex: 0 },
   },
   {
     path: '/ingestion',
     name: 'contract-ingestion',
-    component: ContractIngestionView,
+    component: WorkspaceRoute,
     meta: { sectionIndex: 1 },
   },
   {
     path: '/network',
     name: 'contract-network',
-    component: ContractNetworkView,
+    component: WorkspaceRoute,
     meta: { sectionIndex: 2 },
   },
   { path: '/:pathMatch(.*)*', redirect: '/library' },

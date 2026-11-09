@@ -10,7 +10,7 @@
 docker build -t contract-service-fe:local .
 ```
 
-Dockerfile 使用 Node 24 安装锁文件中的依赖并构建，再将完整 `dist/` 复制到 Nginx 运行镜像。`prebuild` 自动生成 PDF.js 的 CMap、字体和 WASM 资源；本地 `node_modules/`、`dist/`、生成资源和 `.env` 文件不会进入构建上下文。运行镜像不包含项目源码或 Node 依赖。
+Dockerfile 使用 Node 24 安装锁文件中的依赖并构建，再将完整 `dist/` 复制到 Nginx 运行镜像。`prebuild` 自动生成 PDF.js 的 CMap、字体和 WASM 资源；本地 `node_modules/`、`cache/`、`dist/`、生成资源和 `.env` 文件不会进入构建上下文。Vite 引用的 `config/` 模块由 Dockerfile 显式复制，开发压缩依赖仅参与 Node 构建阶段。运行镜像不包含项目源码或 Node 依赖。
 
 容器构建显式使用 `/knowledge-accumulation/contract/` 作为 Vite 基础路径，不修改本地开发配置。页面入口为 `/knowledge-accumulation/contract/library`，API 为同源 `/knowledge-accumulation/contract/api/`；根路径跳转到 `/knowledge-accumulation/contract/`。外层反向代理应保留完整 `/knowledge-accumulation/contract/` 前缀。开发环境则保留完整 `/dev/knowledge-accumulation/contract/`，由开发后端提供同名 API 前缀。
 
@@ -49,6 +49,7 @@ docker run -d --name contract-service-fe \
 - API 保留原始路径、查询参数和 Authorization 请求头，不做 SPA 回退或共享缓存。
 - 关闭代理响应缓冲以支持 SSE；读取超时为两次上游读取之间最长 3600 秒，而非任务总时长。外层网关也必须支持流式转发。
 - 页面路由回退到 `index.html`；缺失的构建资源和 PDF.js 文件返回 404。
+- 业务页面首次访问时动态加载 JS/CSS 分包，必须整体发布同一版本的 `dist/`。镜像替换后，仍打开的旧页面可能请求已经移除的旧哈希分包；发布提示应要求用户先保存或完成未提交操作，再刷新页面。当前镜像不保留历史分包，重试加载不能恢复已删除的旧文件。
 - 图片图标构建时不内联到 JS，独立输出到 `assets/`，默认缓存 30 天并标记 `immutable`；内容更新后通过带内容哈希的新文件名获取新版本。JS/CSS 等其他带哈希资源仍缓存一年。组件内直接绘制的 SVG 无独立网络请求，随所属 JS 缓存。此行为使用 [Vite 图片内联配置](https://vite.dev/config/build-options.html#build-assetsinlinelimit)。
 - `public/` 中固定文件名的图片（包括 SVG 图标）默认缓存 30 天，覆盖 AVIF、WebP、PNG、JPEG、GIF、SVG、ICO、BMP、TIFF 和 APNG。过期后可通过 ETag / Last-Modified 协商缓存；同名替换在有效期内可能仍显示旧图，需要立即更新时应更换文件名或引用 URL 的版本参数。缺失图片返回 404，不附加长期缓存头。
 - HTML 和未带版本路径的 PDF.js 资源仍要求重新验证；API 和受保护的合同 PDF 不受图片缓存规则影响。以上配置仅针对 Docker 内的生产 Nginx，不修改开发服务器缓存；外层网关不应覆盖这些响应头。

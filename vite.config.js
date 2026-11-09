@@ -1,5 +1,6 @@
 import vue from '@vitejs/plugin-vue'
 import { defineConfig, loadEnv } from 'vite'
+import { developmentCompression } from './config/developmentCompression.js'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
@@ -12,13 +13,13 @@ export default defineConfig(({ mode }) => {
   }
   return {
     base: '/dev/knowledge-accumulation/contract/',
-    plugins: [vue()],
+    plugins: [vue(), developmentCompression()],
     build: {
       // 图标独立输出，使用带内容哈希的 URL 和浏览器图片缓存。
       assetsInlineLimit: (filePath) => /\.(?:avif|webp|png|jpe?g|gif|svg|ico|bmp|tiff?|apng)$/i.test(filePath) ? false : undefined,
     },
-    // 网关拦截隐藏目录，预打包缓存使用普通目录以支持图引擎依赖。
-    cacheDir: 'node_modules/vite-cache',
+    // 非隐藏目录可通过网关，放在 node_modules 外避免安装依赖时被清理。
+    cacheDir: 'cache/vite',
     optimizeDeps: {
       include: ['3d-force-graph', 'three'],
       // Nginx 会拦截依赖预打包 URL 中的 `/.vite/` 隐藏目录段。
@@ -29,6 +30,7 @@ export default defineConfig(({ mode }) => {
       port: 17080,
       strictPort: true,
       allowedHosts: ['talent.szkl.com'],
+      warmup: { clientFiles: ['./src/main.js', './src/components/ContractLibraryView.vue'] },
       proxy: {
         '/dev/knowledge-accumulation/contract/api': {
           target,

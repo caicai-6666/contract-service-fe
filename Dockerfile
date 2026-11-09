@@ -5,6 +5,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
 COPY index.html vite.config.js ./
+COPY config ./config
 COPY src ./src
 COPY public ./public
 COPY scripts ./scripts
